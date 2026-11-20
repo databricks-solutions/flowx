@@ -22,7 +22,14 @@ JDBC_SOURCE_TYPES: frozenset[str] = frozenset(
 # Metadata-driven consolidation builds its Lakeflow Connect pipeline on a SQL Server connection, so only these
 # sources may be consolidated; the Copy preparer maps them to the SQLSERVER connection.
 SQL_SERVER_SOURCE_TYPES: frozenset[str] = frozenset(
-    {"SqlServerSource", "AzureSqlSource", "SqlMISource", "SqlSource", "MicrosoftSqlServerSource"}
+    {
+        "SqlServerSource",
+        "AzureSqlSource",
+        "AzureSqlDatabaseSource",
+        "SqlMISource",
+        "SqlSource",
+        "MicrosoftSqlServerSource",
+    }
 )
 
 

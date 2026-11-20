@@ -234,11 +234,13 @@ as CSV; when `none`, ask the user for a CSV file/string. Pass it inline to `modi
 ```
 
 When no metadata-driven motif is consolidated, `--lookup-csv` is omitted and the motif becomes a
-Databricks for-each task running one Spark JDBC read per source table. Consolidating instead emits
+Databricks for-each task running one Spark JDBC read per source table, unless
+`use_lakeflow_connectors=lakeflow_connect` applies to its database source: then it becomes a scaffold
+notebook that raises `NotImplementedError` until you write its Lakeflow Connect ingestion by hand. Consolidating instead emits
 one Lakeflow Connect ingestion pipeline on a SQL Server connection, so inspect offers it, and modify
 applies it, only when the loop's Copy reads a SQL Server source (`SqlServerSource`, `AzureSqlSource`,
-`SqlMISource`, `SqlSource` or `MicrosoftSqlServerSource`), access is `yes` and the size is `small` or
-`medium`. A loop on any other source is not consolidated, and when the answer is given anyway its task
+`AzureSqlDatabaseSource`, `SqlMISource`, `SqlSource` or `MicrosoftSqlServerSource`), access is `yes`
+and the size is `small` or `medium`. A loop on any other source is not consolidated, and when the answer is given anyway its task
 description says why. Modify refuses a `--lookup-csv` whose rows name the same source table twice
 (ignoring case, even from different schemas), because one pipeline can't ingest two tables with the
 same name, or the same destination table twice.

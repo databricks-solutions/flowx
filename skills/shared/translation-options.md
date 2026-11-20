@@ -49,7 +49,8 @@ There is no connector type option: with `use_lakeflow_connectors=lakeflow_connec
 connector each Copy can use (CDC for a table read, query-based for a query with a cursor column).
 
 The `metadata_driven_*` options are offered only for a loop whose Copy reads a SQL Server source
-(`SqlServerSource`, `AzureSqlSource`, `SqlMISource`, `SqlSource` or `MicrosoftSqlServerSource`).
+(`SqlServerSource`, `AzureSqlSource`, `AzureSqlDatabaseSource`, `SqlMISource`, `SqlSource` or
+`MicrosoftSqlServerSource`).
 `metadata_driven_consolidate=consolidate` takes effect when `metadata_driven_access=yes` and
 `metadata_driven_size` is `small` or `medium`; it then emits one Lakeflow Connect pipeline on a SQL
 Server connection. Given for a loop on any other source, the answer is not applied, and the task

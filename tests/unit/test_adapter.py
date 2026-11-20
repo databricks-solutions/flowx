@@ -1251,6 +1251,7 @@ class TestBundleOutput:
         for copy_source_type in (
             "SqlServerSource",
             "AzureSqlSource",
+            "AzureSqlDatabaseSource",
             "SqlMISource",
             "SqlSource",
             "MicrosoftSqlServerSource",
