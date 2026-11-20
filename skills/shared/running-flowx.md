@@ -23,8 +23,8 @@ The only path in Databricks Genie Code, and an option locally with a stdio regis
   pass `output_volume_path` (`/Volumes/...`) or `output_workspace_path` (`/Workspace/...`); the server
   uploads it there and returns `bundle_uploaded`. Grant the `mcp-flowx` app's service principal read on
   the source and write on the target.
-- `databricks bundle validate` and `deploy` of the generated bundle stay a user step (web terminal, local
-  CLI or CI/CD).
+- The MCP tools don't deploy the generated bundle; that stays a user step, with the `databricks` CLI
+  (web terminal, local CLI or CI/CD) or from the workspace as https://docs.databricks.com/aws/en/dev-tools/bundles/workspace describes (read the edition for the target workspace's cloud (the page's cloud selector, or learn.microsoft.com for Azure Databricks)).
 
 ## CLI path
 

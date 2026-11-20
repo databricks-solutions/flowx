@@ -21,8 +21,10 @@ its callers. The top-level `DEPLOY.md` package writes is the same order for a hu
 
 - An output folder with the bundle subfolders from a multi-pipeline migration.
 - A working local `databricks` CLI with a configured profile for the target workspace.
-- **Not on Databricks serverless or Genie Code:** `databricks bundle deploy` and `bundle summary` don't
-  run there, so this is a local CLI (or web terminal) step only.
+- **A CLI session:** the ordered deploy runs the `databricks` CLI (`bundle deploy`, `bundle summary`;
+  see `src/flowx/bundler/deployer.py`), so run it where the CLI is installed and signed in: a local
+  machine or a workspace web terminal, not serverless notebook Python. A single bundle can also be
+  deployed from the workspace as https://docs.databricks.com/aws/en/dev-tools/bundles/workspace describes; read the edition for the target workspace's cloud (the page's cloud selector, or learn.microsoft.com for Azure Databricks).
 
 ## How to run
 
