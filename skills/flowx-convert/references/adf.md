@@ -237,15 +237,16 @@ When no metadata-driven motif is consolidated, `--lookup-csv` is omitted and the
 Databricks for-each task running one Spark JDBC read per source table, unless
 `use_lakeflow_connectors=lakeflow_connect` applies to its database source: then it becomes a scaffold
 notebook that raises `NotImplementedError` until you write its Lakeflow Connect ingestion by hand. Consolidating instead emits
-one Lakeflow Connect ingestion pipeline, when access is `yes` and the size is `small` or `medium`.
-`inspect` raises the `metadata_driven_*` options only for the loops the code can consolidate, lists them
-in `affected_task_keys`, and says in each option's rationale which sources apply
-(`src/flowx/adapter/operations.py`). When the answer is given for a loop that is not consolidated, modify's
-task description says why. Modify refuses a `--lookup-csv` whose rows name the same source table twice
-(ignoring case, even from different schemas), or the same destination table twice. The reason is a
-connector limit: see the limits page of the connector the pipeline uses, for example
-https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-limits. Read the edition for
-the target workspace's cloud (the page's cloud selector, or learn.microsoft.com for Azure Databricks).
+one Lakeflow Connect ingestion pipeline. `inspect` raises the `metadata_driven_*` options only for the
+loops the code can consolidate, lists them in `affected_task_keys`, and says in each option's rationale
+which sources apply (`src/flowx/adapter/operations.py`). The answer takes effect only for such a loop,
+with access `yes` and a size of `small` or `medium`; any other loop keeps its for-each port, and when the
+loop's source is the reason, modify's task description says why. Modify refuses a `--lookup-csv` whose
+rows name the same source table twice (ignoring case, even from different schemas), which one ingestion
+pipeline can't hold (see the limits page of the connector the pipeline uses, for example
+https://docs.databricks.com/aws/en/ingestion/lakeflow-connect/sql-server-limits), or the same destination
+table twice. Read the edition for the target workspace's cloud (the page's cloud selector, or
+learn.microsoft.com for Azure Databricks).
 
 `modify` writes `.work/translation_report.stamped.json` (consumed by package) and
 `metadata/configuration.json` (the kept configuration record). When `inspect` raises no options,

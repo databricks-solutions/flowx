@@ -51,9 +51,10 @@ connector each Copy can use (CDC for a table read, query-based for a query with 
 `inspect` raises the `metadata_driven_*` options only for the loops the code can consolidate, lists them
 in `affected_task_keys`, and says in each option's rationale which sources apply
 (`src/flowx/adapter/operations.py`).
-`metadata_driven_consolidate=consolidate` takes effect when `metadata_driven_access=yes` and
-`metadata_driven_size` is `small` or `medium`; it then emits one Lakeflow Connect pipeline. When the
-answer is given for a loop that is not consolidated, it is not applied, and the task description says why. Modify refuses lookup rows that name the same source or destination table twice.
+`metadata_driven_consolidate=consolidate` takes effect only for such a loop, when
+`metadata_driven_access=yes` and `metadata_driven_size` is `small` or `medium`; it then emits one
+Lakeflow Connect pipeline. Any other loop keeps its for-each port, and when the loop's source is the
+reason, the task description says why. Modify refuses lookup rows that name the same source or destination table twice.
 
 DatabricksNotebook and DatabricksSparkPython tasks always inherit the cluster binding derived from
 their source linked service.

@@ -92,8 +92,9 @@ The order of the patterns in this example is not a ranking; order yours by the f
   capability that collapses a whole legacy pattern (a managed connector, declarative `AUTO CDC`, Auto
   Loader, system tables replacing a home-grown logging tier), not for a like-for-like port. Order the
   patterns by the facts you recorded, the one they favour first, and say why in `fit`. The review page
-  shows the first one as the recommended approach (`src/flowx/reporting/routing_review.py`), so put a
-  like-for-like port first when the facts favour it.
+  (`src/flowx/reporting/routing_review.py`) shows the first system-wide pattern as the recommended
+  approach and a component's first pattern as its suggested pattern, so put a like-for-like port first
+  when the facts favour it.
 - **`release_state` + `release_state_source`** (per recommended pattern): the pattern's *verified*
   Databricks release state and the doc that grounds it. `release_state` is one of `ga`,
   `public_preview`, `private_preview`, `beta`, `unknown`. It is **required** on any pattern with

@@ -6,7 +6,7 @@ description: >
   cross-pipeline relationships. The library validates it, records it in agentic_insights.json and
   rebuilds inventory.json from discovery plus that file. Optional phase 1.a, after discover and
   before convert, and on unless skipped: it runs unless the run is deterministic-only (no agent),
-  because agentic conversion and routing need it.
+  because the agentic route comes only from its insights.
   Use when the user asks to enrich or annotate the inventory, author agentic insights, or recommend
   Databricks patterns.
 ---
@@ -26,11 +26,12 @@ rebuild). Airflow discover saves no `source_graphs.json`, so for Airflow the fil
 ## Before you start
 
 - Discover must have run for this `<output_dir>`.
-- Enrich runs unless the run is deterministic-only (no agent), because agentic conversion and routing
-  need its insights; `flowx-migrate` runs it unless the user asks for a deterministic-only pass. Only a
-  run with no agent skips it. A deterministic-only discover, with no agent and no LLM, is fully valid: its `inventory.json` is complete
-  without an `insights` block, and `flowx-route` still recommends and records a plan from the
-  deterministic structure (its agentic option then shows no recommended patterns).
+- Enrich runs unless the run is deterministic-only (no agent), because the agentic route comes only
+  from its insights: without them, route recommends `deterministic` for every component and its agentic
+  option shows no recommended patterns. `flowx-migrate` runs enrich unless the user asks for a
+  deterministic-only pass; only a run with no agent skips it. A deterministic-only discover, with no
+  agent and no LLM, is fully valid: its `inventory.json` is complete without an `insights` block, and
+  `flowx-route` still recommends and records a plan from the deterministic structure.
 - The one-shot MCP `migrate` command runs discover, convert and package without enrich, so it records
   no insights.
 

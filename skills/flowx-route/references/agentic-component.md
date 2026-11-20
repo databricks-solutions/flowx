@@ -10,20 +10,20 @@ the package phase writes verbatim:
 
 ```json
 {
-  "name": "<PipelineName>",
+  "name": "ExamplePipeline",
   "tags": {"source": "adf"},
   "tasks": [
     {
-      "name": "<TaskName>",
-      "task_key": "<task_key>",
+      "name": "ExampleTask",
+      "task_key": "example_task",
       "type": "AgenticComponentActivity",
       "files": [
-        {"path": "<folder>/<file>.py", "content": "# authored pipeline source ..."}
+        {"path": "example/pipeline.py", "content": "# authored pipeline source ..."}
       ],
       "resources": [
-        {"resource_key": "<resource_key>", "definition": { "channel": "current", "...": "raw pipeline resource" }}
+        {"resource_key": "example_pipeline", "definition": { "channel": "current", "...": "raw pipeline resource" }}
       ],
-      "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.<resource_key>.id}"}},
+      "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.example_pipeline.id}"}},
       "raw_definition": { "...": "original source definitions, retained for auditing" }
     }
   ]

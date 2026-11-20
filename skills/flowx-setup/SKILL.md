@@ -76,7 +76,8 @@ base dependencies only (the default). Setup can run again later to add it.
 
 ### Step 4: Genie Code: grant access and add the server
 
-Relay these to the user (the script also prints them):
+Relay these to the user. The script also prints steps 1 and 2; for adding the server, follow step 3
+here and the Genie Code page rather than the script's text.
 
 1. **App access:** grant Can use on `mcp-flowx` to the users and service principals that will call it
    (Apps UI, Permissions, or `databricks apps set-permissions mcp-flowx ...`).
