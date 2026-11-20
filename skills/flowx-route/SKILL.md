@@ -250,6 +250,8 @@ of `.work/` and documents what was packaged and how. The folder layout is in
 - [`references/fill-agentic-rules.md`](references/fill-agentic-rules.md): everything fill-agentic checks, and the one-at-a-time lock.
 - [`references/agentic-component.md`](references/agentic-component.md): authoring an `AgenticComponentActivity` and its release state.
 - [`references/after-package.md`](references/after-package.md): changing the conversion after package has run.
+- [`../flowx-convert/references/adf.md`](../flowx-convert/references/adf.md): the full `AgenticComponentActivity` contract, including every field package refuses.
+- [`../shared/translation-options.md`](../shared/translation-options.md): which Copies and loops convert's managed-target options take.
 - [`../shared/running-flowx.md`](../shared/running-flowx.md): the common MCP and CLI rules.
 - [`../shared/output-folder.md`](../shared/output-folder.md): what each phase writes in the output folder.
 - The `flowx-enrich` skill writes the insights the agentic option and the groupings use; the `flowx-convert` skill owns the deterministic engine, `merge_agentic` and the just-in-time configuration; the `flowx-package` skill builds the bundle.

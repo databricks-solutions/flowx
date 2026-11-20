@@ -24,7 +24,7 @@ included. End each answer with the fact on one line, `fact: value (source: code 
 
 Don't take the list of options from memory, from an earlier migration, or from this skill. For the
 component's source or kind, read the current official Databricks documentation and list every option it
-offers today, including the ways each option can run (for ingestion, the
+offers, including the ways each option can run (for ingestion, the
 [ingestion overview](https://docs.databricks.com/aws/en/ingestion/overview) is a starting point). Record
 each page you rely on in `conversation` with the date you read it. Check each option's release state
 live, as `flowx-enrich` requires, and disclose it.
