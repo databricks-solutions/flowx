@@ -88,9 +88,11 @@ The order of the patterns in this example is not a ranking; order yours by the f
   `cascade` step or any other); the violation names the field. Summarise rather than paste source code.
 - **`recommended_patterns`** (per pipeline and system-wide): **1–4** patterns. The validator enforces
   the count and that each has a non-empty `pattern` and `fit` and a boolean `simplification_pattern`;
-  it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a distinctive
-  capability that collapses a whole legacy pattern (a managed connector, declarative `AUTO CDC`, Auto
-  Loader, system tables replacing a home-grown logging tier), not for a like-for-like port. Order the
+  it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a capability the
+  current Databricks docs describe as replacing that whole legacy pattern, and cite the page in
+  `release_state_source` (the [ingestion overview](https://docs.databricks.com/aws/en/ingestion/overview)
+  is one starting point); never for a like-for-like port. Read the edition for the target workspace's
+  cloud (the page's cloud selector, or learn.microsoft.com for Azure Databricks). Order the
   patterns by the facts you recorded, the one they favour first, and say why in `fit`. The review page
   (`src/flowx/reporting/routing_review.py`) shows the first system-wide pattern as the recommended
   approach and a component's first pattern as its suggested pattern, so put a like-for-like port first
