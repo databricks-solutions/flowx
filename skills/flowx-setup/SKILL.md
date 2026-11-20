@@ -82,9 +82,10 @@ Relay these to the user (the script also prints them):
    (Apps UI, Permissions, or `databricks apps set-permissions mcp-flowx ...`).
 2. **Data access:** grant the app's service principal access to the catalogs, schemas and volumes the
    migration touches, plus any SQL warehouse the reporting tools use.
-3. **Add it in Genie Code (Agent mode):** Settings, MCP Servers, Add Server, choose Custom MCP server,
-   select the `mcp-flowx` app, and Save. The single `flowx` tool then appears (MCP needs Agent mode and
-   takes one of the 20 tool slots). Check the health endpoint `<app-url>/`.
+3. **Add it in Genie Code:** add the `mcp-flowx` app as a custom MCP server in Genie Code as
+   https://docs.databricks.com/aws/en/genie-code/mcp describes, and check any limit on tools there; read the
+   edition for the target workspace's cloud (the page's cloud selector, or learn.microsoft.com for Azure
+   Databricks). The single `flowx` tool then appears. Check the health endpoint `<app-url>/`.
 4. **Cost profiling only (yes in Step 2):** give the app an Azure service principal as described in
    `app/README.md` ("Optional: live Azure features"), then run
    `flowx(command="profile", parameters={"source": "adf", ...})`.
