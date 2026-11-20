@@ -10,20 +10,20 @@ the package phase writes verbatim:
 
 ```json
 {
-  "name": "IngestAll",
+  "name": "<PipelineName>",
   "tags": {"source": "adf"},
   "tasks": [
     {
-      "name": "IngestAll",
-      "task_key": "ingest_all",
+      "name": "<TaskName>",
+      "task_key": "<task_key>",
       "type": "AgenticComponentActivity",
       "files": [
-        {"path": "ingest/lakeflow_connect.py", "content": "# authored pipeline source ..."}
+        {"path": "<folder>/<file>.py", "content": "# authored pipeline source ..."}
       ],
       "resources": [
-        {"resource_key": "ingest_all_pipeline", "definition": { "channel": "current", "...": "raw pipeline resource" }}
+        {"resource_key": "<resource_key>", "definition": { "channel": "current", "...": "raw pipeline resource" }}
       ],
-      "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.ingest_all_pipeline.id}"}},
+      "task": {"pipeline_task": {"pipeline_id": "${resources.pipelines.<resource_key>.id}"}},
       "raw_definition": { "...": "original source definitions, retained for auditing" }
     }
   ]
@@ -46,23 +46,18 @@ The full contract, including every field package refuses, is the `AgenticCompone
 `flowx-convert`'s [`references/adf.md`](../../flowx-convert/references/adf.md). fill-agentic runs each authored pipeline through package's prepare
 and bundle-writing path, so a component package would refuse is refused at fill, with nothing written.
 
-**Set the Lakeflow pipeline / Connect resource `channel` to `current`.** A pipeline's channel picks its
-runtime, not access to a feature, so never map a release state to `channel: preview`. Use `preview` only
-when the official page for that connector or feature says its pipelines must, and cite that page in the
-plan's `conversation`. The routing recommendation exposes each agentic option's release states as a
-neutral `release_disclosures` list (factual labels, no alarm). Show the state as disclosure:
-
-- `ga`: not shown.
-- `unknown`: the plain label **"Release state not verified"**, so a state nobody could verify never
-  looks the same as a verified `ga`.
-- `public_preview`: the label **"Public Preview (production-ready)"**: generally production-ready and
-  supported per Databricks; still confirm workspace availability.
-- `private_preview`: the plain label **"Private Preview"**.
-- `beta`: the plain label **"Beta"**.
+**Set the Lakeflow pipeline / Connect resource `channel` to `current`** unless the official page for that
+connector or feature says its pipelines must use `preview`, and cite that page in the plan's
+`conversation`. What a channel does is on the pipeline settings page
+(https://docs.databricks.com/aws/en/ldp/configure-pipeline); read the edition for the target workspace's
+cloud (the page's cloud selector, or learn.microsoft.com for Azure Databricks). The routing
+recommendation exposes each agentic option's release states as a neutral `release_disclosures` list.
+Show the `label` route puts there for each pattern (`src/flowx/routing.py`); `ga` has none.
 
 As in `flowx-enrich`, the state is disclosure, not a gate: there is no `doNotSuggest` rule, so a
-verified **Private Preview** connector may still be recommended. Show its label, say that Private
-Preview typically needs workspace enrollment, and let the customer decide. And **verify GA-vs-Preview
+verified **Private Preview** connector may still be recommended. Show its label, say what the release
+types page says about access to that state (https://docs.databricks.com/aws/en/release-notes/release-types),
+and let the customer decide. And **verify GA-vs-Preview
 status before recommending any connector or Lakeflow Connect pattern**: do not hardcode GA/Preview status or dates (release state changes), check
 the feature's current release state **and** target-workspace availability against the current public
 Databricks docs, and cite the source. (Same structured grounding rule the `flowx-enrich` skill

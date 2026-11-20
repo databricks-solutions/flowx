@@ -160,7 +160,7 @@ plan, convert and package behave exactly as before).
 Run the `flowx-route` skill on the baseline from Step 5. Route writes its per-component recommendation
 and the suggested groupings into `metadata/conversion_plan.json`, every decision pending, and draws them
 as `metadata/routing_review.html`. Present the page, ask what the customer wants the conversion to
-achieve, qualify the target pattern for any ingestion component (the skill's "Qualify the target
+achieve, qualify the target pattern for every component (the skill's "Qualify the target
 pattern"), record only the customer's decisions, and run route again. Once nothing is pending, route
 applies the plan: each routed-agentic unit's tasks become placeholder gaps, and deterministic units
 leave the report untouched. A user who wants a straight deterministic migration decides every

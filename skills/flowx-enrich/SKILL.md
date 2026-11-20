@@ -91,7 +91,8 @@ so never take one from memory or from this skill. Before you name a connector or
 `recommended_patterns` or `system_recommendation`, check on the current public Databricks docs that its
 release state is acceptable and that it is available in the target workspace;
 [Databricks preview releases](https://docs.databricks.com/aws/en/release-notes/release-types) explains
-the states. Check first, then recommend. Record the state in the pattern's `release_state` (`ga`,
+the states. Read the edition for the target workspace's cloud (the page's cloud selector, or
+learn.microsoft.com for Azure Databricks). Check first, then recommend. Record the state in the pattern's `release_state` (`ga`,
 `public_preview`, `private_preview`, `beta`, or `unknown` when you could not verify it) and cite the page
 in `release_state_source`. The validator requires a state on every `simplification_pattern: true` pattern
 and a source for the preview and beta states. A preview or beta capability may still be recommended:

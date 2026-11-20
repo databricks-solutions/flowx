@@ -180,7 +180,7 @@ The agentic approach trades speed for coverage — it can handle the long tail o
 
 ## Expression Function Coverage
 
-flowx deterministically translates 77 of 84 ADF expression functions to Python notebook code. The remaining 7 functions require agentic translation:
+flowx translates ADF expression functions to Python notebook code. These functions are left as agentic gaps:
 
 - `dataUri`, `dataUriToBinary`, `dataUriToString`, `decodeDataUri` — Data URI encoding/decoding (rare in practice)
 - `uriComponentToBinary` — URI component to binary conversion
