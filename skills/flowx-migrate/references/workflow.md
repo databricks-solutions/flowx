@@ -210,7 +210,7 @@ This means the package phase could target different output formats (Terraform, r
 | Dataset | Unity Catalog table/volume path |
 | Data flow | DLT pipeline or PySpark notebook |
 | Trigger (schedule) | Job schedule (`quartz_cron_expression`) |
-| Trigger (tumbling window) | Job schedule (periodic) |
+| Trigger (tumbling window) | No schedule; only a `schedule_setup_note` in the job YAML |
 | Trigger (event) | File arrival trigger |
 | Integration runtime | Job cluster or serverless compute |
 

@@ -20,7 +20,7 @@ This reference defines the mapping between Azure Data Factory activity types and
 
 | ADF Activity Type | Strategy | Translator / Skill | Databricks Target |
 |---|---|---|---|
-| Copy | Deterministic | `copy.py` | `notebook_task` (Auto Loader / COPY INTO / JDBC) or `pipeline_task` (DLT) |
+| Copy | Deterministic | `copy.py` | `notebook_task` (Auto Loader, JDBC, REST pagination or a generic Spark read; an SDP scaffold notebook with `copy_activity_paradigm=sdp`), or `pipeline_task` on a Lakeflow Connect pipeline with `use_lakeflow_connectors=lakeflow_connect` |
 | DatabricksNotebook | Deterministic | `notebook.py` | `notebook_task` |
 | DatabricksSparkJar | Deterministic | `spark_jar.py` | `spark_jar_task` |
 | DatabricksSparkPython | Deterministic | `spark_python.py` | `spark_python_task` |
@@ -58,9 +58,13 @@ This reference defines the mapping between Azure Data Factory activity types and
 ### Copy (`copy.py`)
 
 Translates ADF Copy activities based on source/sink types:
-- **Blob/ADLS to Delta** — Auto Loader (`cloudFiles`) notebook or COPY INTO
-- **SQL to Delta** — JDBC read notebook
-- **Delta to Delta** — DLT pipeline with `pipeline_task`
+- **Blob/ADLS to Delta**: Auto Loader (`cloudFiles`) notebook
+- **SQL to Delta**: JDBC read notebook
+- **REST source**: a notebook with a pagination loop
+- **Any other source**: a generic Spark read and write notebook
+- With `copy_activity_paradigm=sdp`, a Copy to Delta becomes an SDP scaffold notebook instead, unless
+  its source query has constructs such as joins or aggregates; it is still a `notebook_task`. A `pipeline_task` comes only from `use_lakeflow_connectors=lakeflow_connect`,
+  for a database Copy to Delta that a Lakeflow Connect connector can take.
 - Handles type mapping, column mapping, and partitioning from ADF typeProperties
 
 ### DatabricksNotebook (`notebook.py`)
