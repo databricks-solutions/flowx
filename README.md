@@ -100,6 +100,7 @@ Or run individual phases:
 /flowx:flowx-discover    # Parse the source (ADF JSON / Airflow DAGs), produce inventory + complexity report
 /flowx:flowx-enrich      # Validate and record agent-authored insights on the inventory
 /flowx:flowx-convert     # Deterministic + agentic translation
+/flowx:flowx-route       # Decide deterministic vs. agentic per pipeline group and fill the agentic groups (ADF)
 /flowx:flowx-package     # Generate DABs project
 /flowx:flowx-profile     # (ADF, optional) Estimate current ADF spend from a live Azure scan
 ```
@@ -230,7 +231,7 @@ data-interval timetable, the fire time for an Airflow 3 raw cron, and the trigge
 
 Operators without a deterministic mapping become a failing placeholder and are recorded in
 `gaps.json` for review. Eligible leaf gaps can use the fingerprint-bound resolver backed by the pinned [`airflow-to-dabs`](https://github.com/park-peter/airflow-to-dabs/tree/main/providers/flowx-gap-resolver) provider profile; flowx retains ownership of parsing, graph identity, policy, IR, and packaging. Full matrix:
-[`skills/flowx-convert/sources/airflow-coverage.md`](skills/flowx-convert/sources/airflow-coverage.md).
+[`skills/shared/airflow-coverage.md`](skills/shared/airflow-coverage.md).
 
 Airflow discovery independently audits DAG declarations, task candidates, dependency declarations,
 DAG settings, mapped calls, and operator arguments before comparing them with captured IR. An
@@ -277,6 +278,11 @@ flowx_output/
     agentic_insights.json     # enrich: validated agent-authored insights, rebuilt into inventory.json
     profile_report.csv        # discover: per-pipeline complexity report
     <pipeline>.arm.json       # discover: verbatim original ADF/ARM source
+    conversion_plan.json      # route: the recommendation, suggested groupings and the user's per-component decisions
+    routing_review.html       # route: the standard review page drawn from the plan
+    agentic_conversion.json   # fill-agentic (ADF): the agent's conversion output per routed-agentic unit, re-applied by every route
+    route_audit.json          # package: routing decisions, outcomes, history, conversation and hashes, written when a plan is recorded
+    packaged_bundles.json     # package: the bundle folders it wrote, so the next package archives the ones it no longer writes
     configuration.json        # modify: collected configuration answers
   .work/                      # transient intermediates (translation report, IR, gaps.json); pruned by package
 ```

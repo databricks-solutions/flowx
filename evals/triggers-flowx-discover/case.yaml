@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-discover
+description: The flowx-discover skill should trigger for a request it describes.
+tags: [trigger, flowx-discover]
+runs: 3
+execution:
+  prompt: "Parse the Azure Data Factory export in ./adf_export and give me an inventory of which activities flowx can translate."
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-discover-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-discover"'

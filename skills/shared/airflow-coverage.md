@@ -1,13 +1,21 @@
 # Airflow → DABs — coverage and follow-ups
 
-What the `--source airflow` path converts today, and what it does **not** yet handle. This is a
+What the `--source airflow` path converts, and what it does **not** handle. This is a
 verified inventory against the parser (`src/flowx/sources/airflow/`), not an aspirational roadmap.
 Use it to set expectations before a migration and to prioritize follow-up work.
 
 The Airflow parser is a **static AST walk** — it reads DAG modules with `ast.parse`, never installs
 Airflow, and never executes a DAG. Anything the static walk can't see, it can't convert.
 
-## Supported today
+## Contents
+
+- [Supported](#supported)
+- [Not supported](#not-supported)
+- [Dataproc and Managed Spark](#dataproc-and-managed-spark)
+- [dbt factory mode](#dbt-factory-mode)
+- [Priority for remaining follow-ups](#priority-for-remaining-follow-ups)
+
+## Supported
 
 | Construct | Result |
 | --- | --- |
@@ -56,7 +64,7 @@ When a gap uses project code the DAG file imports (a custom operator class, an i
 
 The resolver consumes the pinned `airflow-to-dabs` Flowx provider profile. It receives one flowx-produced gap envelope and cannot express graph or task-policy changes. Accepted `resolved` candidates contribute to mechanically validated code-attached coverage, but remain agentic and do not increase deterministic coverage. `needs_input`, `deferred`, and unreviewed candidates remain linked failing placeholders.
 
-## Not yet supported
+## Not supported
 
 These are absent but fail safely — routed to a linked placeholder notebook that raises
 `NotImplementedError`, explicitly excluded, or rejected by reconciliation — or are deliberate scope
@@ -177,4 +185,4 @@ files are not copied, so a job that relied on such a file needs it moved into on
 
 1. **Full TaskGroup expansion** — lower a `@task_group` / `TaskGroup.partial().expand()` into its
    member tasks (a for-each over the group when mapped) instead of a placeholder.
-2. **Additional sensor families** — as demand warrants; unmapped sensors route to a placeholder today.
+2. **Additional sensor families**: as demand warrants; unmapped sensors route to a placeholder.

@@ -23,12 +23,14 @@ operation; `parameters` is its keyword-argument dict.
 | `merge_agentic` | `adapter convert --merge-agentic` | Merge ADF agent-produced results into the report |
 | `resolve_agentic` | `adapter resolve-agentic` | Prepare, stage, and apply reviewed Airflow leaf-gap resolutions |
 | `enrich` | `adapter enrich` | Return `inventory.json` (`prepare`), then validate and record agent-authored insights (`apply`) |
+| `route` | `adapter route` | Write the recommendation into `conversion_plan.json` and the review page; apply the plan once decided |
+| `fill_agentic` | `adapter fill-agentic` | Fill a routed-agentic unit with agent-authored pipelines (ADF) |
 | `inspect` | `adapter inspect` | Surface pending translation options |
 | `apply_answers` | `adapter modify` | Apply answers → stamped IR |
 | `materialize_lookup` | `adapter materialize-lookup` | CSV → lookup-values JSON |
 | `workspace_paths` | `adapter workspace-paths` | Detect workspace paths / hosts |
 | `package` | `adapter package` | Emit the deployable DAB bundle |
-| `migrate` | discover→convert→package | Full non-interactive migration |
+| `migrate` | discover→convert→package | Deterministic-only migration in one call (never runs `enrich` or `route`; for a migration that enriches (any source) or routes (ADF), run the phases one at a time, passing the same source to `discover` and `convert`) |
 | `profile` | `adapter profile` | Estimate current ADF spend (live Azure scan; needs the `azure` extra) |
 | `record_results` | `adapter record-results` | Write coverage to a UC table |
 | `install_dashboard` | `adapter install-dashboard` | Publish the coverage dashboard |
@@ -90,7 +92,7 @@ env:
 
 The service principal needs Reader and Data Factory Contributor on the subscription or resource
 group it scans, and Cost Management Reader on the subscription (see
-`skills/flowx-profile/sources/adf.md`). Anyone with **Can use** on the app can run `profile` with this
+`skills/flowx-profile/references/adf.md`). Anyone with **Can use** on the app can run `profile` with this
 identity, so grant it only to people who may see these factories' runs and costs.
 
 **CLI alternative — `deploy.sh`:**

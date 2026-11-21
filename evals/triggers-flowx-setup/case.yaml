@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-setup
+description: The flowx-setup skill should trigger for a request it describes.
+tags: [trigger, flowx-setup]
+runs: 3
+execution:
+  prompt: "Set up flowx on my laptop so I can run the migration skills. Right now I get ModuleNotFoundError: No module named 'flowx'."
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-setup-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-setup"'

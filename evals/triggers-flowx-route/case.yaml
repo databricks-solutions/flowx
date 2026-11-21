@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-route
+description: The flowx-route skill should trigger for a request it describes.
+tags: [trigger, flowx-route]
+runs: 3
+execution:
+  prompt: "For each connected component in my flowx output, should it convert deterministically or agentically? Walk me through the conversion plan."
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-route-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-route"'

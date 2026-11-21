@@ -4,6 +4,18 @@ Source guide for `--source adf`. Parse Azure Data Factory pipeline, dataset, lin
 trigger JSON files into a typed AST and produce a classified inventory. See the parent `SKILL.md`
 for the shared output layout, inventory shape, and how to run a phase.
 
+## Contents
+
+- [Step 1: Determine the ADF source path](#step-1--determine-the-adf-source-path)
+- [Step 2: Download from UC volumes if needed](#step-2--download-from-uc-volumes-if-needed)
+- [Step 3: Run the deterministic parser](#step-3--run-the-deterministic-parser)
+- [Step 4: Read and validate the inventory](#step-4--read-and-validate-the-inventory)
+- [Step 4b: Review the complexity report](#step-4b--review-the-complexity-report)
+- [Step 5: Present the summary](#step-5--present-the-summary)
+- [Step 6: Detail agentic activities](#step-6--detail-agentic-activities)
+- [Step 7: Warn about unsupported activities](#step-7--warn-about-unsupported-activities)
+- [Step 8: Confirm output location](#step-8--confirm-output-location)
+
 ## Step 1 — Determine the ADF source path
 
 Ask the user for the location of their ADF JSON exports. If they don't have one yet, run the
@@ -19,9 +31,11 @@ The directory should contain subdirectories or files for:
 - `linkedService/` or `linked_services/` — linked service JSON files (optional)
 - `trigger/` or `triggers/` — trigger definition JSON files (optional)
 
-On the MCP path the hosted server cannot read your workspace/volume files, so pass the ADF JSON
-inline as `adf_definitions` (a mapping of relative path → JSON content), or for large factories
-reference the source via `adf_volume_path` / `adf_workspace_path`.
+On the MCP path the hosted server cannot read files by path, whether they sit in your local file
+system, the workspace, or a Databricks volume. For a workspace or volume source, pass
+`adf_workspace_path` or `adf_volume_path` and the server downloads it through the SDK. For files on
+your machine, upload them to a volume first, or for a small factory pass the ADF JSON inline as
+`adf_definitions` (a mapping of relative path → JSON content).
 
 ## Step 2 — Download from UC volumes if needed
 

@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-resolve-airflow-gaps
+description: The flowx-resolve-airflow-gaps skill should trigger for a request it describes.
+tags: [trigger, flowx-resolve-airflow-gaps]
+runs: 3
+execution:
+  prompt: "My Airflow DAG converted with PlaceholderActivity gaps for two KubernetesPodOperator tasks. Resolve those gaps before I package the bundle."
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-resolve-airflow-gaps-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-resolve-airflow-gaps"'

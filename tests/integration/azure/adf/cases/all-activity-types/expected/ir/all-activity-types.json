@@ -211,6 +211,12 @@
           "wait_time_seconds": 1
         }
       ],
+      "depends_on": [
+        {
+          "outcome": null,
+          "task_key": "set-variable"
+        }
+      ],
       "name": "switch",
       "on_expression": "{{tasks.set-variable.values.status}}",
       "task_key": "switch",

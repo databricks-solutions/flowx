@@ -10,11 +10,13 @@ from flowx.models.adf_ast import (
 )
 from flowx.models.ir import (
     Activity,
+    CopyActivity,
     Dependency,
+    ForEachActivity,
     MotifActivity,
     Pipeline,
 )
-from flowx.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY
+from flowx.models.motifs import MOTIF_METADATA_DRIVEN_BULK_COPY, DetectedMotif
 from flowx.motifs.collapser import collapse_motifs
 from flowx.motifs.detector import detect_motifs
 
@@ -165,6 +167,34 @@ class TestCollapser:
         assert post.name == "PostProcessing"
         assert post.depends_on is not None
         assert post.depends_on[0].task_key == motif_task.task_key
+
+    def test_collapse_records_the_source_type_of_the_copy_inside_the_loop(self):
+        """The bulk-copy Copy sits inside the For each; its source type still reaches the motif settings."""
+        copy = CopyActivity(name="CopyTable", task_key="CopyTable", source_type="OracleSource")
+        pipeline = Pipeline(
+            name="test",
+            tasks=[
+                _ir_activity("GetTableList"),
+                ForEachActivity(
+                    name="ForEachTable",
+                    task_key="ForEachTable",
+                    depends_on=[Dependency(task_key="GetTableList")],
+                    items_expression="@activity('GetTableList').output.value",
+                    inner_activities=[copy],
+                ),
+            ],
+        )
+        detected = DetectedMotif(
+            definition=MOTIF_METADATA_DRIVEN_BULK_COPY,
+            matched_activities=["GetTableList", "ForEachTable"],
+            source_type_hint="database",
+            confidence_notes=["Test match"],
+        )
+
+        motif_task = collapse_motifs(pipeline, [detected]).tasks[0]
+
+        assert isinstance(motif_task, MotifActivity)
+        assert motif_task.motif_config["copy_source_type"] == "OracleSource"
 
     def test_collapse_no_motifs_returns_unchanged(self):
         pipeline = Pipeline(

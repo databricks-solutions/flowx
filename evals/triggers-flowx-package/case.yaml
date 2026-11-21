@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: triggers-flowx-package
+description: The flowx-package skill should trigger for a request it describes.
+tags: [trigger, flowx-package]
+runs: 3
+execution:
+  prompt: "Package the translated pipelines in ./flowx_output into Databricks Asset Bundles targeting catalog analytics, schema bronze."
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: flowx-package-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-package"'

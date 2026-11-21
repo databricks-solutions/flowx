@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 from collections import defaultdict
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -34,6 +35,7 @@ from flowx.motifs.collapser import collapse_motifs
 from flowx.motifs.detector import detect_motifs
 from flowx.sources.adf.ir_rewriter import rewrite_pipeline_expressions
 from flowx.sources.adf.loader import classify_activity, load_adf_definitions
+from flowx.sources.adf.task_value_dependencies import backfill_task_value_dependencies
 from flowx.sources.adf.translators import (
     append_variable,
     copy,
@@ -111,6 +113,11 @@ def translate_pipeline(
         translators use.  Tokens that cannot be resolved are recorded
         as translation warnings instead of shipping into the bundle
         verbatim.
+
+        Last, every task that reads another task's value through
+        ``{{tasks.P.values.Y}}`` gets a dependency on ``P`` when nothing
+        already puts ``P`` upstream of it, because Databricks rejects the
+        job otherwise.
     """
     context = TranslationContext(
         activity_cache=MappingProxyType({}),
@@ -218,6 +225,9 @@ def translate_pipeline(
                 motif.definition.display_name,
                 len(motif.matched_activities),
             )
+
+    # After the collapse, so a reference to a task folded into a motif gets no edge.
+    pipeline_ir = backfill_task_value_dependencies(pipeline_ir, warnings)
 
     return TranslationReport(
         pipeline=pipeline_ir,
@@ -1361,7 +1371,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge_agentic:
         if not args.report or not args.agentic_results:
             parser.error("--merge-agentic requires --report and --agentic-results")
-        merged_count, unmatched_count = ir_serde.merge_agentic_results(args.report, args.agentic_results, args.output)
+        try:
+            merged_count, unmatched_count = ir_serde.merge_agentic_results(
+                args.report, args.agentic_results, args.output
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 1
         print("\nAgentic Merge Summary")
         print("=====================")
         print(f"Merged:    {merged_count}")
@@ -1425,10 +1441,12 @@ def main(argv: list[str] | None = None) -> int:
     report_file.write_text(json.dumps(report_payload, indent=2, default=str), encoding="utf-8")
     logger.info("Wrote translation_report.json to %s", report_file)
 
+    gaps_file = work_dir / "gaps.json"
     if all_gaps:
-        gaps_file = work_dir / "gaps.json"
         gaps_file.write_text(json.dumps(all_gaps, indent=2, default=str), encoding="utf-8")
         logger.info("Wrote %d gap(s) to %s", len(all_gaps), gaps_file)
+    else:
+        gaps_file.unlink(missing_ok=True)
 
     total = total_deterministic + total_agentic + total_unsupported
     print("\nTranslation Summary")

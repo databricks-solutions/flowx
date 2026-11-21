@@ -126,8 +126,8 @@ class RecommendedPattern:
         release_state: The pattern's verified Databricks release state -- one of
             :data:`RELEASE_STATES` -- established against **current public docs** at authoring time
             (never hardcoded). It is surfaced downstream (routing) as a neutral factual **disclosure**,
-            never a warning: ``"ga"`` and ``"unknown"`` are silent (``"unknown"`` is treated exactly
-            like ``"ga"`` -- the two are indistinguishable in the surfaced output); ``"public_preview"``
+            never a warning: ``"ga"`` is silent; ``"unknown"`` is labelled "Release state not
+            verified" so it never looks like a verified GA; ``"public_preview"``
             is disclosed as production-ready (Public Preview is generally production-ready and supported
             per Databricks); ``"private_preview"`` and ``"beta"`` are stated as plain factual labels.
             **Required** whenever :attr:`simplification_pattern` is ``True`` -- a distinctive capability

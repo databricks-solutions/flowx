@@ -218,7 +218,7 @@ def _build_object_from_lookup_row(row: dict[str, Any]) -> dict[str, Any]:
         ``objects[].table``.  Bundle variables back-fill any field the
         lookup row did not supply.
     """
-    source_table = row.get("source_table") or row.get("table_name") or row.get("table") or "${var.source_table}"
+    source_table = lookup_row_source_table(row)
     return {
         "table": {
             "source_catalog": row.get("source_catalog") or row.get("catalog_name") or "${var.source_catalog}",
@@ -229,3 +229,36 @@ def _build_object_from_lookup_row(row: dict[str, Any]) -> dict[str, Any]:
             "destination_table": row.get("destination_table") or source_table,
         }
     }
+
+
+# The lookup-row columns that name a source table, in the order they are read.
+_SOURCE_TABLE_COLUMNS = ("source_table", "table_name", "table")
+
+
+def lookup_row_source_table(row: dict[str, Any]) -> str:
+    """Returns the source table a lookup row names, or the bundle variable that stands in for it."""
+    return next((row[column] for column in _SOURCE_TABLE_COLUMNS if row.get(column)), "${var.source_table}")
+
+
+def repeated_table_names(rows: list[dict[str, Any]]) -> list[str]:
+    """Returns the table names that more than one lookup row uses as its source or its destination, ignoring case.
+
+    One Lakeflow Connect pipeline can't ingest two tables with the same name, even from different
+    schemas or databases, and two objects can't write one destination table, so a consolidated
+    pipeline must not be built from such rows. A row that names no table is left to the bundle
+    variable and isn't counted.
+    """
+    repeated: list[str] = []
+    reported: set[str] = set()
+    for column_names in (_SOURCE_TABLE_COLUMNS, ("destination_table", *_SOURCE_TABLE_COLUMNS)):
+        seen: set[str] = set()
+        for row in rows:
+            name = next((row[column] for column in column_names if row.get(column)), None)
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen and key not in reported:
+                repeated.append(name)
+                reported.add(key)
+            seen.add(key)
+    return repeated

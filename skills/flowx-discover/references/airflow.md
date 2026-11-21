@@ -10,9 +10,9 @@ never executed. It extracts operators, `>>` / `<<` task dependencies, the DAG's
 `schedule_interval`, and inline PythonOperator callables / BashOperator commands. Each task is
 classified:
 
-- **Deterministic** — a mapped operator (PythonOperator, BashOperator) that becomes a generated
-  notebook task.
-- **Agentic** — an operator with no deterministic mapping yet; emitted as a placeholder for
+- **Deterministic**: a mapped operator or sensor that becomes a notebook, SQL, Spark, run-job or dbt
+  task; [`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md) lists each one.
+- **Agentic**: an operator with no deterministic mapping; emitted as a placeholder for
   LLM-assisted translation.
 
 ## Step 1 — Determine the Airflow source path
@@ -65,7 +65,7 @@ name, or a job that allows one run at a time where Airflow allowed more. Each DA
 
 ## Step 5 — Detail agentic tasks
 
-For `agentic` tasks, name the operator that has no deterministic mapping yet (e.g. a custom or
+For `agentic` tasks, name the operator that has no deterministic mapping (e.g. a custom or
 provider operator) and note it will be emitted as a placeholder notebook for the convert phase to
 fill via LLM-assisted translation.
 
@@ -79,6 +79,6 @@ location and proceed to `flowx-convert` with the same `<output_dir>` and `--sour
 For the full verified support matrix — classic operators, TaskFlow (`@dag`/`@task`), sensors,
 TaskGroups (incl. group-level dependencies), and dbt factory (static + PyDABs) — plus the constructs
 that are **not** handled (dynamic TaskGroup mapping, shared multi-DAG bundle), see
-[`../../flowx-convert/sources/airflow-coverage.md`](../../flowx-convert/sources/airflow-coverage.md).
+[`../../shared/airflow-coverage.md`](../../shared/airflow-coverage.md).
 Callables reading Airflow task context (`**context` / `ti`) or XCom, and runtime-branching
 decorators, are routed to placeholders for manual/agentic translation rather than converted.

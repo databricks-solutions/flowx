@@ -1,0 +1,17 @@
+schema_version: "1.1"
+name: no-trigger-general-databricks
+description: No flowx skill should trigger for a request that isn't a migration.
+tags: [no-trigger, negative]
+runs: 3
+execution:
+  prompt: "What is the difference between a Databricks job and a Lakeflow Spark Declarative Pipeline?"
+  max_turns: 4
+  allowed_tools: [Read, Glob, Grep, Skill]
+graders:
+  - name: no-flowx-skill
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?flowx-'
+    min: 0
+    max: 0
+    arm: both

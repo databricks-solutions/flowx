@@ -1,13 +1,13 @@
 # The agentic insights shape
 
-This is the reference for the `insights` JSON you author before calling `enrich`. The `flowx-enrich`
-SKILL.md covers the workflow (how much to write, the authoring steps, how to run `enrich`, and
-when a deterministic-only pass skips it); this file covers **what to write** and the rules the
-validator enforces.
+Read this from Step 4 of the `flowx-enrich` skill, which covers when to skip enrich, how much to write
+and how to run it. This file covers what to write and the rules the validator enforces. The
+`flowx-route` step reads the block to present the agentic conversion option per component.
 
-Author the insights when a human reader would benefit from a migration narrative — which pipelines
-collapse onto a managed capability, how the factory hangs together, what the risky couplings are.
-The `flowx-route` step reads this block to present the agentic conversion option per component.
+## Contents
+
+- [The insights shape](#the-insights-shape)
+- [Idempotency & safety](#idempotency--safety)
 
 ## The insights shape
 
@@ -27,33 +27,33 @@ of those four keys yourself:
   "system_recommendation": {
     "headline": "The one decision a migrator must make before any per-pipeline work",
     "recommended_patterns": [
-      {"pattern": "<managed connector for your source>", "fit": "Replaces the child extractor family", "simplification_pattern": true, "release_state": "<verify live; do not copy — one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"},
-      {"pattern": "Parameterised Lakeflow Job", "fit": "Like-for-like orchestration fallback", "simplification_pattern": false}
+      {"pattern": "<an option you found in the current Databricks docs>", "fit": "<why it fits these pipelines>", "simplification_pattern": true, "release_state": "<verify live, one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"},
+      {"pattern": "<the like-for-like port>", "fit": "<why it remains an option>", "simplification_pattern": false}
     ],
-    "cascade": ["5 child extractors -> managed connector pipelines"],
-    "decision_driver": "Is a managed connector available and its release state verified/approved for this source?"
+    "cascade": ["<which pipelines the decision replaces or changes>"],
+    "decision_driver": "<the open fact or check that decides between the patterns>"
   },
   "pipeline_insights": [
     {
-      "pipeline": "IngestSalesforce",
-      "intent": "Land Salesforce objects into the bronze layer nightly",
-      "databricks_pattern": "Managed ingestion",
+      "pipeline": "LoadSource",
+      "intent": "<what the pipeline does, in a sentence>",
+      "databricks_pattern": "<the target pattern, in plain words>",
       "recommended_patterns": [
-        {"pattern": "<managed CDC ingestion connector>", "fit": "Managed CDC ingestion replaces the copy loop", "simplification_pattern": true, "release_state": "<verify live; do not copy — one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"}
+        {"pattern": "<an option you found in the current Databricks docs>", "fit": "<why it fits this pipeline>", "simplification_pattern": true, "release_state": "<verify live, one of ga|public_preview|private_preview|beta|unknown>", "release_state_source": "<cite the current Databricks doc you verified>"}
       ],
-      "conversion_notes": ["Point the connector at the same source objects"],
-      "risk_if_ignored": "Bespoke extractor code and its watermark table carry forward"
+      "conversion_notes": ["source: <system> via <source type>", "fact: <value> (source: code | data | user | assumed)"],
+      "risk_if_ignored": "<what breaks or is lost if the insight is ignored>"
     }
   ],
   "pipeline_relationships": [
     {
       "from_pipeline": "Orchestrator",
-      "to_pipeline": "IngestSalesforce",
+      "to_pipeline": "LoadSource",
       "lineage_edge": {"edge_type": "control", "edge_identity": "<via_task_key from a real control edge>"},
-      "relationship_summary": "Orchestrator invokes IngestSalesforce"
+      "relationship_summary": "Orchestrator invokes LoadSource"
     },
     {
-      "from_pipeline": "IngestSalesforce",
+      "from_pipeline": "LoadSource",
       "to_pipeline": "BuildMart",
       "lineage_edge": {
         "edge_type": "inferred",
@@ -65,6 +65,9 @@ of those four keys yourself:
   ]
 }
 ```
+
+The order of the patterns in this example is not a ranking; order yours by the facts, as the rule on
+`recommended_patterns` below says.
 
 ### Rules the validator enforces
 
@@ -87,9 +90,11 @@ of those four keys yourself:
   the count and that each has a non-empty `pattern` and `fit` and a boolean `simplification_pattern`;
   it does **not** enforce ordering. Set `simplification_pattern: true` **only** for a distinctive
   capability that collapses a whole legacy pattern (a managed connector, declarative `AUTO CDC`, Auto
-  Loader, system tables replacing a home-grown logging tier) — not for a like-for-like port. By
-  convention (not validated), order them best-first and list the `simplification_pattern: true` ones
-  ahead of like-for-like ports.
+  Loader, system tables replacing a home-grown logging tier), not for a like-for-like port. Order the
+  patterns by the facts you recorded, the one they favour first, and say why in `fit`. The review page
+  (`src/flowx/reporting/routing_review.py`) shows the first system-wide pattern as the recommended
+  approach and a component's first pattern as its suggested pattern, so put a like-for-like port first
+  when the facts favour it.
 - **`release_state` + `release_state_source`** (per recommended pattern): the pattern's *verified*
   Databricks release state and the doc that grounds it. `release_state` is one of `ga`,
   `public_preview`, `private_preview`, `beta`, `unknown`. It is **required** on any pattern with
@@ -124,19 +129,19 @@ writes a table (or file) that another pipeline reads, record it on the `inferred
 ```jsonc
 // WRONG — the validator rejects this and tells you to use the 'inferred' tier
 {
-  "from_pipeline": "IngestSalesforce",
+  "from_pipeline": "LoadSource",
   "to_pipeline": "BuildMart",
   "lineage_edge": {"edge_type": "data", "edge_identity": "sales.curated"}
 }
 
 // RIGHT — a cross-pipeline data coupling rides the 'inferred' tier
 {
-  "from_pipeline": "IngestSalesforce",
+  "from_pipeline": "LoadSource",
   "to_pipeline": "BuildMart",
   "lineage_edge": {
     "edge_type": "inferred",
     "edge_identity": "shared table sales.curated",
-    "evidence": "IngestSalesforce writes sales.curated; BuildMart reads it — the hand-off is inside notebook code the parser can't see",
+    "evidence": "LoadSource writes sales.curated and BuildMart reads it; the hand-off is inside notebook code the parser can't see",
     "confidence": "medium"
   }
 }
@@ -144,4 +149,4 @@ writes a table (or file) that another pipeline reads, record it on the `inferred
 
 ## Idempotency & safety
 
-See the `flowx-enrich` SKILL.md "Idempotency & safety" section: a validation failure writes nothing.
+See "Idempotency and safety" under Output in the `flowx-enrich` SKILL.md: a validation failure writes nothing.

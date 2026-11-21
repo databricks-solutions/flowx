@@ -61,7 +61,7 @@ if ! "${CLAUDE_BIN}" -p \
   --allowedTools="${allowed_tools}" \
   --disallowedTools="${denied_reads}" <<CLAUDE_PROMPT
 Use the flowx:flowx-convert skill, specifically the ADF agentic-gap instructions in
-${plugin_dir}/skills/flowx-convert/sources/adf.md steps 4 and 5. Read
+${plugin_dir}/skills/flowx-convert/references/adf.md steps 4 and 5. Read
 ${FLOWX_OUTPUT}/.work/translation_report.json, ${FLOWX_OUTPUT}/.work/gaps.json, and the
 exported ADF definitions under ${ADF_EXPORT_DIR}. Produce one merge result for each
 PlaceholderActivity in translation_report.json. This is the exact expected task list:
