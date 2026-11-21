@@ -35,6 +35,7 @@ from flowx.motifs.collapser import collapse_motifs
 from flowx.motifs.detector import detect_motifs
 from flowx.sources.adf.ir_rewriter import rewrite_pipeline_expressions
 from flowx.sources.adf.loader import classify_activity, load_adf_definitions
+from flowx.sources.adf.task_value_dependencies import backfill_task_value_dependencies
 from flowx.sources.adf.translators import (
     append_variable,
     copy,
@@ -112,6 +113,11 @@ def translate_pipeline(
         translators use.  Tokens that cannot be resolved are recorded
         as translation warnings instead of shipping into the bundle
         verbatim.
+
+        Last, every task that reads another task's value through
+        ``{{tasks.P.values.Y}}`` gets a dependency on ``P`` when nothing
+        already puts ``P`` upstream of it, because Databricks rejects the
+        job otherwise.
     """
     context = TranslationContext(
         activity_cache=MappingProxyType({}),
@@ -219,6 +225,9 @@ def translate_pipeline(
                 motif.definition.display_name,
                 len(motif.matched_activities),
             )
+
+    # After the collapse, so a reference to a task folded into a motif gets no edge.
+    pipeline_ir = backfill_task_value_dependencies(pipeline_ir, warnings)
 
     return TranslationReport(
         pipeline=pipeline_ir,
