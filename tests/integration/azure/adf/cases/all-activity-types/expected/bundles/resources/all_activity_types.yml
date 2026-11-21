@@ -96,6 +96,8 @@ resources:
           op: EQUAL_TO
           left: '{{tasks.set-variable.values.status}}'
           right: running
+        depends_on:
+        - task_key: set-variable
       - task_key: case-wait
         notebook_task:
           notebook_path: ../src/notebooks/case_wait.py
