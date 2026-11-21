@@ -100,34 +100,39 @@ discover ran.
 
 `<output_dir>/metadata/profile_report.csv` has one row per pipeline: `pipeline`, `activities`,
 `datasets`, `linked_services`, `collapsible_patterns`, `databricks_native_activities`,
-`control_flow_activities`, `other_activities`, `complexity_score`, `complexity_size` (S ≤5, M ≤15,
-L ≤30, XL >30). Use it to set expectations: S/M are largely deterministic; L/XL warrant closer
-review and more agentic translation.
+`control_flow_activities`, `other_activities`, `complexity_score` and `complexity_size`. The size is a
+weighted count of activities, datasets, linked services and patterns (`src/flowx/sources/adf/loader.py`),
+not a measure of strategy; for how much of a pipeline is agentic, use its strategy counts in
+`inventory.json`.
 
 ## Step 5 — Present the summary
+
+Present the summary discover prints, with the values from its output:
 
 ```
 ADF Profile Summary
 ===================
-Pipelines parsed:     12
-Total activities:     47
+Pipelines parsed:     <n>
+Total activities:     <n>  (raw activities, incl. nested)
+  (convert counts only top-level activities, before any motif collapse, so its total may differ)
+
 Strategy Breakdown:
-  Deterministic:      35 (74.5%)
-  Agentic:            10 (21.3%)
-  Unsupported:         2 ( 4.3%)
-Coverage:             95.7%
+  Deterministic:      <n>
+  Agentic:            <n>
+  Unsupported:        <n>
+Coverage:             <pct>%
 ```
 
 ## Step 6 — Detail agentic activities
 
 For `agentic` activities, explain that each is translated by the agent using LLM-assisted reasoning
-from the activity's ARM JSON (no built-in deterministic translator exists), e.g. `ExecuteDataFlow`,
-`Switch`, `Until`, stored procedures.
+from the activity's ARM JSON (no built-in deterministic translator exists). Name the activities whose
+`strategy` in `inventory.json` is `agentic`; the type lists are in `src/flowx/sources/adf/loader.py`.
 
 ## Step 7 — Warn about unsupported activities
 
-For `unsupported` activities, warn clearly, e.g. `ExecuteSSISPackage` — recommend manual conversion
-to a PySpark notebook.
+For `unsupported` activities, warn clearly: name the activities whose `strategy` in `inventory.json` is
+`unsupported`, and say they need a conversion the customer chooses, by hand.
 
 ## Step 8 — Confirm output location
 

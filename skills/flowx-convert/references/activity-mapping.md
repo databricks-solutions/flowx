@@ -34,20 +34,20 @@ This reference defines the mapping between Azure Data Factory activity types and
 | DatabricksJob | Deterministic | `databricks_job.py` | `run_job_task` |
 | Switch | Deterministic | `switch.py` | chained `condition_task`s |
 | Wait | Deterministic | `wait.py` | `notebook_task` (`time.sleep`) |
-| ExecuteDataFlow | Agentic | Agentic (LLM-assisted) | DLT pipeline or PySpark notebook |
-| Until | Agentic | Agentic (LLM-assisted) | while-loop notebook |
+| ExecuteDataFlow | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| Until | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
 | Filter | Deterministic | `filter.py` | `notebook_task` (filter array + task values) |
 | AppendVariable | Deterministic | `append_variable.py` | `notebook_task` (append to array task value) |
-| SqlServerStoredProcedure | Agentic | Agentic (LLM-assisted) | SQL notebook |
-| AzureFunction | Agentic | Agentic (LLM-assisted) | webhook/REST notebook |
-| WebHook | Agentic | Agentic (LLM-assisted) | REST notebook |
-| Custom | Agentic | Agentic (LLM-assisted) | custom notebook |
-| ExecuteSSISPackage | Agentic | Agentic (LLM-assisted) | PySpark notebook |
-| AzureMLExecutePipeline | Agentic | Agentic (LLM-assisted) | MLflow notebook |
-| GetMetadata | Agentic | Agentic (LLM-assisted) | `notebook_task` that reads file or table metadata |
-| Validation | Agentic | Agentic (LLM-assisted) | `notebook_task` that waits for and checks a dataset |
-| Fail | Agentic | Agentic (LLM-assisted) | `notebook_task` that raises the activity's error |
-| Script | Agentic | Agentic (LLM-assisted) | SQL task or `notebook_task` |
+| SqlServerStoredProcedure | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| AzureFunction | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| WebHook | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| Custom | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| ExecuteSSISPackage | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| AzureMLExecutePipeline | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| GetMetadata | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| Validation | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| Fail | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
+| Script | Agentic | Agentic (LLM-assisted) | Agent-authored: proposed from the source, the current docs and the facts (see `adf.md` Step 4) |
 | Triggers (`ScheduleTrigger`) | Deterministic | convert (`src/flowx/sources/adf/translate.py`) | job `schedule` (`quartz_cron_expression`), or a periodic trigger for a day or week interval above 1; a month interval above 1 gets only a `schedule_setup_note` |
 | Triggers (`TumblingWindowTrigger`) | Manual setup | convert (`src/flowx/sources/adf/translate.py`) | no schedule; only a `schedule_setup_note` in the job YAML |
 | Triggers (`BlobEventsTrigger`) | Deterministic | convert (`src/flowx/sources/adf/translate.py`) | `file_arrival` trigger |
@@ -182,7 +182,7 @@ The agentic approach trades speed for coverage — it can handle the long tail o
 
 flowx translates ADF expression functions to Python notebook code. These functions are left as agentic gaps:
 
-- `dataUri`, `dataUriToBinary`, `dataUriToString`, `decodeDataUri` — Data URI encoding/decoding (rare in practice)
+- `dataUri`, `dataUriToBinary`, `dataUriToString`, `decodeDataUri`: Data URI encoding/decoding
 - `uriComponentToBinary` — URI component to binary conversion
 - `xml`, `xpath` — XML parsing and XPath evaluation (complex DOM handling)
 

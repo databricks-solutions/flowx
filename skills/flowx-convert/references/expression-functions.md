@@ -1,26 +1,25 @@
 # ADF Expression Function Translation Reference
 
-This reference documents how all 84 ADF expression functions are translated by `flowx.parser.expression_parser`.
+This reference documents how the ADF expression functions are translated by `flowx.parser.expression_parser`.
 
 ## Contents
 
 - [Translation Categories](#translation-categories)
-- [String Functions (12): notebook_code](#string-functions-12--notebook_code)
-- [Collection Functions (10): notebook_code](#collection-functions-10--notebook_code)
-- [Logical Functions (9): notebook_code](#logical-functions-9--notebook_code)
-- [Conversion Functions (24): notebook_code / agentic](#conversion-functions-24--notebook_code--agentic)
-- [Math Functions (9): notebook_code](#math-functions-9--notebook_code)
-- [Date/Time Functions (20): notebook_code / agentic](#datetime-functions-20--notebook_code--agentic)
-- [Summary](#summary)
-- [Agentic Functions (7 total)](#agentic-functions-7-total)
+- [String Functions: notebook_code](#string-functions-notebook_code)
+- [Collection Functions: notebook_code](#collection-functions-notebook_code)
+- [Logical Functions: notebook_code](#logical-functions-notebook_code)
+- [Conversion Functions: notebook_code / agentic](#conversion-functions-notebook_code--agentic)
+- [Math Functions: notebook_code](#math-functions-notebook_code)
+- [Date/Time Functions: notebook_code / agentic](#datetime-functions-notebook_code--agentic)
+- [Agentic Functions](#agentic-functions)
 
 ## Translation Categories
 
-- **notebook_code** — Translated to Python code embedded in the generated notebook body.
-- **dab_ref** — Mapped to a DAB dynamic value reference (rare for functions; primarily for `@pipeline()`, `@activity()`, `@variables()`, `@item()`).
-- **agentic** — Too complex for deterministic translation; returns `None` and requires LLM-assisted translation.
+- **notebook_code**: Translated to Python code embedded in the generated notebook body.
+- **dab_ref**: Mapped to a DAB dynamic value reference (mainly for `@pipeline()`, `@activity()`, `@variables()`, `@item()`).
+- **agentic**: Too complex for deterministic translation; returns `None` and requires LLM-assisted translation.
 
-## String Functions (12) — notebook_code
+## String Functions: notebook_code
 
 | ADF Function | Python Translation | Notes |
 |---|---|---|
@@ -38,7 +37,7 @@ This reference documents how all 84 ADF expression functions are translated by `
 | `toUpper(text)` | `str(text).upper()` | |
 | `trim(text)` | `str(text).strip()` | |
 
-## Collection Functions (10) — notebook_code
+## Collection Functions: notebook_code
 
 | ADF Function | Python Translation |
 |---|---|
@@ -53,7 +52,7 @@ This reference documents how all 84 ADF expression functions are translated by `
 | `take(collection, count)` | `collection[:int(count)]` |
 | `union(c1, c2, ...)` | `list(set(c1) \| set(c2) \| ...)` |
 
-## Logical Functions (9) — notebook_code
+## Logical Functions: notebook_code
 
 | ADF Function | Python Translation |
 |---|---|
@@ -67,7 +66,7 @@ This reference documents how all 84 ADF expression functions are translated by `
 | `not(expr)` | `(not expr)` |
 | `or(a, b)` | `(a or b)` |
 
-## Conversion Functions (24) — notebook_code / agentic
+## Conversion Functions: notebook_code / agentic
 
 | ADF Function | Python Translation | Status |
 |---|---|---|
@@ -79,11 +78,11 @@ This reference documents how all 84 ADF expression functions are translated by `
 | `bool(value)` | `bool(value)` | notebook_code |
 | `coalesce(a, b, ...)` | `next((x for x in [a, b, ...] if x is not None), None)` | notebook_code |
 | `createArray(a, b, ...)` | `[a, b, ...]` | notebook_code |
-| `dataUri(value)` | — | **agentic** (rare, complex encoding) |
-| `dataUriToBinary(value)` | — | **agentic** |
-| `dataUriToString(value)` | — | **agentic** |
+| `dataUri(value)` | not translated | **agentic** (complex encoding) |
+| `dataUriToBinary(value)` | not translated | **agentic** |
+| `dataUriToString(value)` | not translated | **agentic** |
 | `decodeBase64(value)` | `base64.b64decode(value).decode()` | notebook_code (alias of base64ToString) |
-| `decodeDataUri(value)` | — | **agentic** |
+| `decodeDataUri(value)` | not translated | **agentic** |
 | `decodeUriComponent(value)` | `urllib.parse.unquote(value)` | notebook_code |
 | `encodeUriComponent(value)` | `urllib.parse.quote(str(value), safe='')` | notebook_code |
 | `float(value)` | `float(value)` | notebook_code |
@@ -91,12 +90,12 @@ This reference documents how all 84 ADF expression functions are translated by `
 | `json(value)` | `json.loads(value)` | notebook_code |
 | `string(value)` | `str(value)` | notebook_code |
 | `uriComponent(value)` | `urllib.parse.quote(str(value), safe='')` | notebook_code (alias of encodeUriComponent) |
-| `uriComponentToBinary(value)` | — | **agentic** |
+| `uriComponentToBinary(value)` | not translated | **agentic** |
 | `uriComponentToString(value)` | `urllib.parse.unquote(value)` | notebook_code (alias of decodeUriComponent) |
-| `xml(value)` | — | **agentic** (XML handling complex) |
-| `xpath(xml, expr)` | — | **agentic** (XPath complex) |
+| `xml(value)` | not translated | **agentic** (XML handling complex) |
+| `xpath(xml, expr)` | not translated | **agentic** (XPath complex) |
 
-## Math Functions (9) — notebook_code
+## Math Functions: notebook_code
 
 | ADF Function | Python Translation |
 |---|---|
@@ -110,7 +109,7 @@ This reference documents how all 84 ADF expression functions are translated by `
 | `range(start, count)` | `list(range(start, start + count))` |
 | `sub(a, b)` | `(a - b)` |
 
-## Date/Time Functions (20) — notebook_code / agentic
+## Date/Time Functions: notebook_code / agentic
 
 All date functions use `from datetime import datetime, timezone, timedelta`.
 
@@ -143,26 +142,14 @@ runs, so check each zone name and change it to its IANA name. `ticks` uses float
 digits can differ from ADF's, and it fails on a timestamp with no UTC offset; check any id or sort key
 built from it.
 
-## Summary
-
-| Category | Total | notebook_code | agentic |
-|---|---|---|---|
-| String | 12 | 12 | 0 |
-| Collection | 10 | 10 | 0 |
-| Logical | 9 | 9 | 0 |
-| Conversion | 24 | 17 | 7 |
-| Math | 9 | 9 | 0 |
-| Date/Time | 20 | 20 | 0 |
-| **Total** | **84** | **77** | **7** |
-
-## Agentic Functions (7 total)
+## Agentic Functions
 
 These functions return `None` from `resolve_expression()` and require LLM-assisted translation:
 
-1. `dataUri` — Data URI encoding (rare in ADF pipelines)
-2. `dataUriToBinary` — Data URI to binary conversion
-3. `dataUriToString` — Data URI to string conversion
-4. `decodeDataUri` — Data URI decoding
-5. `uriComponentToBinary` — URI component to binary
-6. `xml` — XML parsing (complex DOM handling)
-7. `xpath` — XPath evaluation (requires XML context)
+1. `dataUri`: Data URI encoding
+2. `dataUriToBinary`: Data URI to binary conversion
+3. `dataUriToString`: Data URI to string conversion
+4. `decodeDataUri`: Data URI decoding
+5. `uriComponentToBinary`: URI component to binary
+6. `xml`: XML parsing (complex DOM handling)
+7. `xpath`: XPath evaluation (requires XML context)

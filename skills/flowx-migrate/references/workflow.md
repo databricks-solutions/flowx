@@ -116,7 +116,7 @@ The agent fills the gaps afterwards: route and fill-agentic for routed-agentic u
 
 **Key decisions:**
 - Deterministic translators run first because they are fast and reliable. Agentic skills are only invoked for gaps.
-- The IR is an intermediate format that decouples translation from DABs generation. This allows the package phase to target different output formats in the future.
+- The IR is an intermediate format that decouples translation from DABs generation, so the package phase can change without changing the translation.
 - Each source's deterministic translators are standalone Python modules under `src/flowx/sources/<source>/` (e.g. ADF's live in `src/flowx/sources/adf/translators/`). Adding support for a new activity type means adding a new module there.
 - Agentic fills are stored in `metadata/agentic_conversion.json`, apart from convert's baseline, so they can be inspected, revised, or applied again after a fresh convert.
 
@@ -175,7 +175,7 @@ The agent fills the gaps afterwards: route and fill-agentic for routed-agentic u
 
 ### Deterministic-first, agentic fallback
 
-The majority of ADF activities (Copy, DatabricksNotebook, ForEach, IfCondition, etc.) have well-defined Databricks equivalents. Building deterministic translators for these ensures:
+Many ADF activities (Copy, DatabricksNotebook, ForEach, IfCondition, etc.) have well-defined Databricks equivalents; the inventory's `summary` counts the activities per strategy. Building deterministic translators for these ensures:
 - **Speed**: no LLM calls for the activities a translator covers
 - **Reliability** — same input always produces same output
 - **Testability** — translators are unit-testable Python functions
@@ -211,15 +211,13 @@ This means the package phase could target different output formats (Terraform, r
 | Pipeline variable | Task value |
 | Linked service | Unity Catalog connection or secret scope |
 | Dataset | Unity Catalog table/volume path |
-| Data flow | DLT pipeline or PySpark notebook |
-| Trigger (schedule) | Job schedule (`quartz_cron_expression`) |
-| Trigger (tumbling window) | No schedule; only a `schedule_setup_note` in the job YAML |
-| Trigger (event) | File arrival trigger |
-| Integration runtime | Job cluster or serverless compute |
+| Data flow | Agent-authored: proposed from the source, the current docs and the facts (see `flowx-convert`'s `references/adf.md` Step 4) |
+| Trigger | Per trigger type, as [`adf-coverage.md`](../../flowx-convert/references/adf-coverage.md#triggers) lists |
+| Integration runtime | Not translated; see [`adf-coverage.md`](../../flowx-convert/references/adf-coverage.md#integration-runtimes-and-on-premises-sources) |
 
 ## Error Handling
 
-- **Parse errors** — logged to `parse_errors.json`, skipped in inventory
+- **Parse errors**: logged by discover with the file or resource that failed, and skipped in the inventory
 - **Translation failures** — marked as `failed` in translation report, get placeholder tasks in DABs
 - **Agentic failures** — saved with error details, can be retried with additional context
 - **Unsupported activities** — warned at discover, get placeholder tasks with TODO comments in DABs

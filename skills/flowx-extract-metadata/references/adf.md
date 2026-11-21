@@ -35,8 +35,8 @@ If the user isn't sure, ask at most these, in order, and recommend the first tha
 
 Options 1 and 2 are the simplest: they need nothing beyond access the user usually already has.
 Git is first because it needs no Azure role and gives versioned files, but only when the factory is
-Git-connected — often only the development factory is. A production factory deployed by CI/CD
-usually isn't; use option 2 or 3 against it if its values matter. Option 3 signs in as the user
+Git-connected. For a factory that isn't (for example one deployed by CI/CD), use option 2 or 3 if its
+values matter. Option 3 signs in as the user
 (`az login` locally, or a device code in Databricks). Only if none of these work, or the user asks
 for a sign-in with no interaction, use **"When the user's own sign-in doesn't work"** in Step 4 —
 don't bring up service principals or service credentials before that.
@@ -45,8 +45,8 @@ When the user picks one, explain what it needs before starting, using the table 
 
 | | 1. Git repository | 2. ADF Studio download | 3. Azure API |
 |---|---|---|---|
-| **Permissions** | Read access to the repository. No Azure role. | **Data Factory Contributor** on the factory is enough (Microsoft doesn't document a smaller export-only role). | **Reader** on the factory, for the user. (There is no built-in "Data Factory Reader" role; Reader on the resource group also works but exposes more than needed.) |
-| **You'll need** | The repo, its branches and the factory's *root folder* (ADF Studio > Manage > Source control > Git configuration). In Databricks, a Git credential for that provider. | A browser with ADF Studio | Tenant ID, subscription ID, resource group and factory name (ADF Studio > Manage > Properties); network access to `management.azure.com`. Device-code sign-in may be blocked by company policy (see Step 4). |
+| **Permissions** | Read access to the repository. No Azure role. | **Data Factory Contributor** on the factory (see Microsoft's [roles and permissions page](https://learn.microsoft.com/en-us/azure/data-factory/concepts-roles-permissions)). | **Reader** on the factory, for the user. Reader on the resource group also works but exposes more than needed. |
+| **You'll need** | The repo, its branches and the factory's *root folder* (ADF Studio > Manage > Source control > Git configuration; see [source control](https://learn.microsoft.com/en-us/azure/data-factory/source-control)). In Databricks, a Git credential for that provider. | A browser with ADF Studio | Tenant ID, subscription ID, resource group and factory name (in the factory's properties in ADF Studio); network access to `management.azure.com`. Device-code sign-in may be blocked by company policy (see Step 4). |
 | **Gets you** | The latest commit on the collaboration branch, a release tag, or the published template — the user confirms which | The factory as it is now in ADF Studio | The factory exactly as it is now |
 
 ### Options 1 and 2 are done by the user
@@ -95,18 +95,19 @@ Then give the user the steps for where they work. Suggested instructions:
   2. Copy that version: `git clone --depth 1 --branch <branch-or-tag> <repo-url> <folder>`
   3. Check what they got: `git -C <folder> log -1 --format='%h %ci %s'`
 - **In Databricks (a Git folder):**
-  1. Add a Git credential if they don't have one: **Settings > Linked accounts > Add Git credential**.
-     For Azure DevOps choose **Azure DevOps (MSFT Entra)** (no token needed). For GitHub choose
-     **Link Git account** (the Databricks GitHub App) or a personal access token with read access to
-     the repo; if the GitHub App can't be installed on the repo's owner (common with
-     enterprise-managed accounts and org policies), use a token.
-  2. Create the Git folder: **Workspace > Create > Git folder**, with the repo URL.
+  1. Add a Git credential for the repo's provider if they don't have one, as the Git folders docs
+     describe (https://docs.databricks.com/aws/en/repos/get-access-tokens-from-git-provider; read the
+     edition for the target workspace's cloud, the page's cloud selector, or learn.microsoft.com for
+     Azure Databricks). The page lists each provider's options; read access to the repo is enough.
+  2. Create the Git folder with the repo URL
+     (https://docs.databricks.com/aws/en/repos/git-operations-with-repos).
   3. Pick the version. It opens on the default branch, normally the collaboration branch. For the
      published version, choose the publish branch in the branch selector at the top of the Git
      folder. For a tag, run `databricks repos update <repo-id> --tag <tag>` (the Git folder's ID is
      in its URL, or from `databricks repos list`); a tag that doesn't exist fails with "Remote ref
      does not exist". Warn them **not** to type a tag into the branch selector: that creates a new
-     branch with the tag's name instead of checking out the tag.
+     branch with the tag's name instead of checking out the tag (the Git operations page above
+     covers branches and tags).
 
 **Ask the user to confirm the exact version** before you continue: the commit id, date and message
 from step 3 on their machine, or the branch or tag and commit shown in the Git folder. Then ask for
@@ -118,17 +119,20 @@ branch.
 Give the user these steps:
 
 1. Open the factory in **ADF Studio** → **Manage** (toolbox icon) → under **Source control**, **ARM
-   template** → **Export ARM template**. The browser downloads `arm_template.zip`.
+   template** → **Export ARM template**, as Microsoft's
+   [manual promotion page](https://learn.microsoft.com/en-us/azure/data-factory/continuous-integration-delivery-manual-promotion)
+   describes. The browser downloads `arm_template.zip`.
 2. Unzip it. It holds `ARMTemplateForFactory.json`, `ARMTemplateParametersForFactory.json`,
    `linkedTemplates/` and a `factory/` folder.
 3. Put it where flowx can read it. Keep `ARMTemplateForFactory.json` and
    `ARMTemplateParametersForFactory.json` together — without the parameters file, values such as
    trigger parameters stay unresolved. In Databricks, uploading just those two files to a
    `/Workspace` folder or a Unity Catalog volume is enough (Catalog > the volume > **Upload to this
-   volume**); the rest of the zip isn't needed.
+   volume**; see https://docs.databricks.com/aws/en/ingestion/file-upload/upload-to-volume); the rest
+   of the zip isn't needed.
 4. Come back with the path of the folder (or of `ARMTemplateForFactory.json`).
 
-The Azure portal's generic **Export template** does **not** work for Data Factory; it must be ADF Studio.
+Use ADF Studio's export, as that page describes, not the Azure portal's generic **Export template**.
 
 When they're back, go to Step 5 with that path. The check points discover at
 `ARMTemplateForFactory.json` — never the folder itself, which would load no pipelines.
@@ -238,13 +242,13 @@ connector's managed identity, so there is no code and no secret. Setup, once:
 
 1. **Azure:** give an access connector's managed identity **Reader** on the factory. Prefer a
    connector dedicated to this over the one behind the metastore's storage credential, so the
-   access isn't tied to an identity the platform team treats as storage-only. Creating a connector
-   needs Contributor on a resource group.
-2. **Unity Catalog (`CREATE SERVICE CREDENTIAL` on the metastore, usually a metastore admin):**
-   **Catalog > External data > Credentials > Create credential > Service credential**, with the
-   access connector's resource ID.
-3. **Grant use:** `GRANT ACCESS ON SERVICE CREDENTIAL <name> TO <user or group>`; check it is bound
-   to the workspace if workspace bindings are used.
+   access isn't tied to an identity the platform team treats as storage-only.
+2. **Unity Catalog:** create a service credential with the access connector's resource ID, as the
+   Azure Databricks page
+   https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-services/service-credentials
+   describes; the page names the privilege it needs.
+3. **Grant use:** grant the users or groups who run the extraction access to the credential, as the
+   same page describes, and check it is bound to the workspace if workspace bindings are used.
 
 Then:
 
@@ -252,9 +256,10 @@ Then:
   then signs in with the credential by default, so **Run all** — or a scheduled job — needs no
   interaction.
 - Genie Code running it itself (3a): run the extraction **in a notebook cell, in-process** — a
-  service credential isn't available to a separate `python -m` process. It needs `azure-identity`,
-  `requests`, `pyyaml` and `sqlglot` installed with `%pip`, and Python 3.12 or later (serverless
-  environment version 3 or later):
+  service credential isn't available to a separate `python -m` process. It needs flowx's dependencies
+  and its `azure` extra (`pyproject.toml`) installed with `%pip`, and the Python version
+  `pyproject.toml` requires, on a serverless environment version whose page lists that Python
+  (https://docs.databricks.com/aws/en/release-notes/serverless/environment-version/):
 
   ```python
   import sys
@@ -276,12 +281,12 @@ counts discover will see, and warnings. Always use `discover_path`, not the path
 Act on the warnings:
 
 - **`arm_export_folder`** — expected for option 2 and the publish branch; use the template file it names.
-- **`multiple_factories`** — uncommon: more than one factory shares this folder (for example several
+- **`multiple_factories`**: more than one factory shares this folder (for example several
   factories connected to the same repo with different root folders). Ask which one and check the path
   it lists for that factory.
 - **No pipelines found / not usable** — wrong folder or branch; go back to the option's steps.
 - **Incomplete extraction / count mismatch** — say which resource types are missing and why
-  (usually a missing role); offer to re-run after it's fixed.
+  (for example a missing role); offer to re-run after it's fixed.
 
 ## Step 4 — Hand off to discover
 

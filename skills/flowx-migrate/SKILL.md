@@ -85,21 +85,26 @@ schema, the bundle name and any other `inputs package` option at Step 12.
 
 Run the `flowx-discover` skill with `--source <source>`, the source path and `--output-dir <output_dir>`.
 It writes `metadata/inventory.json` and `metadata/profile_report.csv` (plus `<pipeline>.arm.json` for
-ADF). Present the inventory summary:
+ADF). Present the summary discover prints, with its values (the ADF one is below; the Airflow one is in
+`flowx-discover`'s `references/airflow.md`):
 
 ```
-Discover complete
-Pipelines parsed:     12
-Total activities:     47
-  Deterministic:      35 (74.5%)
-  Agentic:            10 (21.3%)
-  Unsupported:         2 ( 4.3%)
-Coverage:             95.7%
+ADF Profile Summary
+===================
+Pipelines parsed:     <n>
+Total activities:     <n>  (raw activities, incl. nested)
+  (convert counts only top-level activities, before any motif collapse, so its total may differ)
+
+Strategy Breakdown:
+  Deterministic:      <n>
+  Agentic:            <n>
+  Unsupported:        <n>
+Coverage:             <pct>%
 ```
 
 ### Step 3: Confirm before going on
 
-> The discover phase found 47 activities across 12 pipelines. 95.7% have a translation path (74.5% deterministic, 21.3% agentic). 2 activities are unsupported and will need manual handling.
+> The discover phase found <n> activities across <n> pipelines. <pct>% have a translation path (<n> deterministic, <n> agentic). <n> activities are unsupported and will need manual handling.
 >
 > Proceed to the convert phase? (yes/no)
 
@@ -139,13 +144,14 @@ After a package, this is also how you change the conversion (Step 15).
 ```
 Translation Summary
 ===================
-Deterministic:    35
-Agentic:          8
-Unsupported:      4
-Total:            47
+Deterministic:    <n>
+Agentic:          <n>
+Unsupported:      <n>
+Total:            <n>
 ```
 
-Here "Agentic" counts the gaps convert left for the agent; none of them is translated yet.
+Here "Agentic" counts the top-level activities convert left for the agent, none of them translated
+yet; `.work/gaps.json` lists every open gap, nested ones included.
 
 ### Step 6: Present the translation details
 
@@ -205,7 +211,7 @@ options are in [`../shared/translation-options.md`](../shared/translation-option
 
 ### Step 10: Confirm before building the bundle
 
-> Translation is 91.5% complete (35 deterministic, 8 filled by the agent). 4 activities could not be translated automatically.
+> <n> activities are translated (<n> deterministic, <n> filled by the agent). <n> activities could not be translated automatically.
 > Options:
 > 1. Proceed to bundle generation (failed activities will get placeholder tasks)
 > 2. Retry failed translations with more context
@@ -250,19 +256,19 @@ coverage dashboard, as [`../shared/coverage-results.md`](../shared/coverage-resu
 Migration Complete
 ==================
 
-Source:    /Volumes/main/default/adf_export (12 ADF pipelines)
+Source:    <source_path> (<n> ADF pipelines)
 Output:    ./flowx_output/  (bundle + metadata/)
 
 Coverage:
-  Total activities:           47
-  Successfully translated:    43 (91.5%; 8 filled by the agent)
-  Placeholder tasks:           4 ( 8.5%)
+  Total activities:           <n>
+  Successfully translated:    <n> (<n> filled by the agent)
+  Placeholder tasks:          <n>
 
 Generated Files (under ./flowx_output/):
   databricks.yml
-  resources/          (3 job definitions)
-  src/notebooks/      (12 notebooks)
-  src/setup/          (3 setup scripts)
+  resources/          (<n> job definitions)
+  src/notebooks/      (<n> notebooks)
+  src/setup/          (<n> setup scripts)
   SETUP.md
   metadata/           inventory.json, profile_report.csv, <pipeline>.arm.json, configuration.json
 

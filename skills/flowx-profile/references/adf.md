@@ -41,7 +41,8 @@ For each activity run in the window:
   `billingReference` names its billing bucket (data movement, pipeline activity, external activity,
   or data flow) and the billed quantity (DIU-hours for a copy, hours for an activity, the vCore-hours
   a data flow's cluster used). The estimate prices that quantity at the bucket's rate. A data flow's
-  vCore-hours are priced at $0.274 per vCore-hour.
+  vCore-hours use the code's built-in General Purpose rate (`src/flowx/sources/adf/profile/cost_model.py`),
+  not the region's retail price.
 - **Execution, estimated from the duration** (managed-VNet runs, which carry no `billingReference`,
   and any run whose reference isn't recognized): the run's duration, billed in whole minutes with a
   1-minute minimum, times:
@@ -49,25 +50,27 @@ For each activity run in the window:
     hourly data-movement rate.
   - Pipeline activities (Lookup, ForEach, Wait, …) and unknown types: the pipeline-activity rate.
   - External activities (Databricks notebook/job, stored procedure, Web, …): the external-activity rate.
-  - Mapping Data Flow: 8 vCores × $0.274 per vCore-hour.
+  - Mapping Data Flow: 8 vCores at the built-in data flow rate.
 
 Rates come from the public Azure Retail Prices API for each factory's region. Each rate is the price of
 the `Azure Data Factory v2` meter with the exact name Azure uses (for example `Cloud Pipeline Activity` or
 `Self Hosted Data Movement`); a meter the API doesn't return keeps its built-in list rate. A request
 that times out or can't connect is tried once more; if the call still fails, the built-in list rates are
-used, and the report's "Pricing Source" line says which applied.
+used, and the report's "Pricing Source" line says which applied. For current prices, see
+https://azure.microsoft.com/en-us/pricing/details/data-factory/data-pipeline/.
 
 ## Known limitations (carried over from the original profiler, tracked as follow-ups)
 
 - Self-hosted IR VM cost is not included: the estimate covers ADF's own meters only, not the VMs
   a self-hosted IR runs on.
 - **Managed virtual network IRs: the keep-warm time isn't included (biggest known gap).** A managed-VNet
-  IR keeps its compute warm for a time-to-live (TTL, e.g. 60 minutes) after each activity, and Azure bills
-  that time. The estimate counts only the activity's own duration. On one live factory, Azure billed
-  44.6 hours for 45 short notebook runs while the estimate counted 7.25 hours.
+  IR keeps its compute warm for a time-to-live (TTL) after each activity, and Azure bills that time (see
+  https://learn.microsoft.com/en-us/azure/data-factory/managed-virtual-network-private-endpoint). The
+  estimate counts only the activity's own duration, so the gap grows with the TTL and the number of short
+  runs; compare the estimate with the actuals in the report.
 - When a run is priced from its duration (managed VNet), a Copy that doesn't report its DIUs is
   assumed to have used 4, and a Data Flow is assumed to use 8 vCores regardless of the cluster size.
-- Data flow vCore-hours are priced at the General Purpose rate ($0.274), whatever the compute tier.
+- Data flow vCore-hours are priced at the built-in General Purpose rate, whatever the compute tier.
 - Actuals count only the `Azure Data Factory v2` meter subcategory (and empty ones) and the three
   Mapping Data Flow tiers (`Azure Data Factory v2 Data Flow - General Purpose` / `Memory Optimized`
   / `Compute Optimized`). A compute meter Azure introduces under a new name would be left out until

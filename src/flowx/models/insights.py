@@ -41,8 +41,8 @@ from typing import Literal
 # backwards-incompatible change to the authored shape.
 SCHEMA_VERSION = "1"
 
-# Cap on a ranked ``recommended_patterns`` list (per pipeline and system-wide). A short,
-# ranked shortlist keeps the recommendation legible; an unbounded list is noise.
+# Cap on a ``recommended_patterns`` list (per pipeline and system-wide). A short list keeps
+# the recommendation legible; an unbounded list is noise.
 MAX_RECOMMENDED_PATTERNS = 4
 
 # Cap on the characters in any one authored text value. One oversized insight would otherwise be
@@ -106,23 +106,21 @@ class LineageEdgeRef:
 
 @dataclass(slots=True, kw_only=True)
 class RecommendedPattern:
-    """One ranked Databricks target pattern recommended for a pipeline or the whole factory.
+    """One Databricks target pattern recommended for a pipeline or the whole factory.
 
-    A recommendation carries 1-:data:`MAX_RECOMMENDED_PATTERNS` of these, ordered best-first,
-    drawn from the agent's holistic read and grounded in publicly-documented Databricks
-    capabilities. ``simplification_pattern`` ranks the distinctive capabilities that collapse
-    a legacy pattern ahead of like-for-like ports and plain building blocks.
+    A recommendation carries 1-:data:`MAX_RECOMMENDED_PATTERNS` of these, drawn from the agent's
+    holistic read and grounded in publicly documented Databricks capabilities. The agent orders
+    them by the facts it recorded, the one they favour first, and says why in ``fit``; a
+    like-for-like port comes first when the facts favour it.
 
     Attributes:
-        pattern: The named, publicly-documented Databricks capability (e.g. ``"Lakeflow
-            Connect SQL Server connector"``). Never an invented name.
-        fit: One line on why it fits / what custom logic it replaces.
-        simplification_pattern: ``True`` *only* when the pattern uses a **distinctive**
-            Databricks capability that collapses or eliminates a whole legacy pattern -- a
-            managed connector (Lakeflow Connect), declarative CDC (``AUTO CDC``), Auto Loader,
-            or system tables replacing a home-grown logging tier. ``False`` for a like-for-like
-            port and for plain native building blocks that merely re-home the same work.
-            Rank the ``True`` patterns first.
+        pattern: The publicly documented Databricks capability, named as the current docs name
+            it. Never an invented name.
+        fit: One line on why it fits / what custom logic it replaces, and why it sits where it
+            does in the order.
+        simplification_pattern: ``True`` *only* when the current Databricks docs describe the
+            capability as replacing a whole legacy pattern. ``False`` for a like-for-like port
+            and for plain native building blocks that merely re-home the same work.
         release_state: The pattern's verified Databricks release state -- one of
             :data:`RELEASE_STATES` -- established against **current public docs** at authoring time
             (never hardcoded). It is surfaced downstream (routing) as a neutral factual **disclosure**,
@@ -160,15 +158,15 @@ class SystemRecommendation:
         headline: One line naming the decision a migrator must make before any per-pipeline
             work (e.g. "Managed ingestion collapses the extraction factory").
         recommended_patterns: 1-:data:`MAX_RECOMMENDED_PATTERNS` whole-system target
-            architectures, ordered best-first (the simplifying/native branch first).
-            ``recommended_patterns[0]`` is the recommended branch; later entries are ranked
-            fallbacks.
+            architectures, ordered by the recorded facts, the one they favour first. The review
+            page shows ``recommended_patterns[0]`` as the recommended approach; later entries
+            are the other options.
         cascade: What choosing ``recommended_patterns[0]`` collapses or eliminates across the
-            whole system (e.g. "5 child extractors -> managed connector pipelines"). Empty
+            whole system (e.g. "<the pipelines it replaces> -> <what replaces them>"). Empty
             when the decision does not cascade.
-        decision_driver: The gating question that selects the branch (e.g. "Is the Lakeflow
-            Connect SQL Server connector GA/approved for this source?"); omit when there is no
-            single deciding factor.
+        decision_driver: The gating question that selects the branch (e.g. "Is the pattern's
+            release state acceptable for this source?"); omit when there is no single deciding
+            factor.
     """
 
     headline: str
@@ -187,8 +185,8 @@ class PipelineInsight:
         pattern_name: A short label naming the pipeline's recognised shape, when one applies.
         intent: What the pipeline is really trying to accomplish, in business terms.
         databricks_pattern: The single headline Databricks pattern the pipeline maps to.
-        recommended_patterns: 1-:data:`MAX_RECOMMENDED_PATTERNS` ranked target patterns,
-            best-first, chosen under the factory-wide :class:`SystemRecommendation`.
+        recommended_patterns: 1-:data:`MAX_RECOMMENDED_PATTERNS` target patterns, ordered by
+            the recorded facts, chosen under the factory-wide :class:`SystemRecommendation`.
         conversion_notes: Concrete notes a migrator should heed when converting.
         risk_if_ignored: What breaks or degrades if the recommendation is not followed.
     """

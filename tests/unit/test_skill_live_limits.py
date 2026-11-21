@@ -3,7 +3,7 @@
 flowx keeps no copy of the platform limits, because they change. Enrich checks every pattern it recommends
 against the current docs, and route qualifies every target pattern the same way, with one method for any source
 or component that names no source system, limit or size. The skills are text the agent follows, so these tests
-hold the text to that promise.
+hold the text to that promise; test_skills_standard.py keeps source names out of every skill file.
 """
 
 from __future__ import annotations
@@ -30,19 +30,6 @@ SKIPPED_DIRS = {
     "dist",
     "build",
 }
-
-# Words that would tie route's method to one source system, its modes or its sizing.
-SOURCE_SPECIFIC_TERMS = (
-    "SQL Server",
-    "Oracle",
-    "PostgreSQL",
-    "MySQL",
-    "Salesforce",
-    "gateway",
-    "integrated CDC",
-    "Σ",
-    "⌈",
-)
 
 # The steps of the method, in the order route's reference gives them.
 METHOD_STEPS = (
@@ -93,7 +80,7 @@ def test_route_reads_the_limits_live_and_records_them_the_way_enrich_does() -> N
     assert "never use a remembered number" in route
 
 
-def test_route_gives_one_method_for_any_source_and_names_no_source_or_sizing() -> None:
+def test_route_gives_one_method_for_any_source_with_no_fixed_check_ids() -> None:
     route = ROUTE_PATTERNS.read_text(encoding="utf-8")
 
     headings = [line for line in route.splitlines() if line.startswith("## ")]
@@ -102,6 +89,4 @@ def test_route_gives_one_method_for_any_source_and_names_no_source_or_sizing() -
     assert "Don't take the list of options from memory" in one_line
     assert "*Assumption:*" in one_line
     assert "Never pick the pattern on the customer's behalf" in one_line
-    for term in SOURCE_SPECIFIC_TERMS:
-        assert term not in route, term
     assert not re.search(r"\b[ACDM]\d+\b", route), "names a fixed pattern or check id"
