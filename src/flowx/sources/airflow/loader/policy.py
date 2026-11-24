@@ -16,8 +16,11 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
         "schedule",
         "schedule_interval",
         "start_date",
+        "default_args.start_date",
         "timezone",
         "catchup",
+        "concurrency",
+        "max_active_tasks",
         "default_args",
         "params",
         "default_args.retries",
@@ -88,8 +91,37 @@ def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
 
 
 def job_max_concurrent_runs(visitor: _DagVisitor) -> int | None:
-    """Returns the DAG's static positive ``max_active_runs``, the Databricks job's ``max_concurrent_runs``."""
-    value = ops.literal_value(visitor.dag_kwargs.get("max_active_runs"))
+    """Returns the Databricks job's ``max_concurrent_runs`` from the DAG's static run and task limits.
+
+    ``max_active_runs`` caps runs directly. In a DAG with a single task, ``concurrency`` (or its Airflow 2.2+
+    name ``max_active_tasks``) also caps runs, since each run is that one task; the lower limit wins.
+    """
+    limits = [
+        limit
+        for limit in (_static_positive_int(visitor.dag_kwargs.get("max_active_runs")), single_task_concurrency(visitor))
+        if limit is not None
+    ]
+    return min(limits) if limits else None
+
+
+def single_task_concurrency(visitor: _DagVisitor) -> int | None:
+    """Returns the DAG's static ``concurrency`` / ``max_active_tasks`` when the DAG has exactly one task.
+
+    The limit counts running task instances across all of a DAG's runs, which Databricks Jobs has no
+    setting for. With one task per run it is the same as a limit on concurrent runs.
+    """
+    task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
+    if task_count != 1:
+        return None
+    names = [name for name in ("max_active_tasks", "concurrency") if name in visitor.dag_kwargs]
+    limits = {_static_positive_int(visitor.dag_kwargs[name]) for name in names}
+    if not names or None in limits:
+        return None
+    return min(limit for limit in limits if limit is not None)
+
+
+def _static_positive_int(node: ast.expr | None) -> int | None:
+    value = ops.literal_value(node)
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
@@ -168,8 +200,24 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             ),
             "rationale": "template_searchpath_not_statically_resolvable",
         }
+    if name in ("concurrency", "max_active_tasks"):
+        if single_task_concurrency(visitor) is not None:
+            return {
+                "status": "mapped",
+                "target": "job.max_concurrent_runs",
+                "rationale": "single_task_dag_task_limit_is_a_run_limit",
+            }
+        return {
+            "status": "gap",
+            "message": (
+                f"Airflow {name} limits running task instances across the DAG's runs, which Databricks Jobs has "
+                "no setting for; it maps to Job max_concurrent_runs only for a single-task DAG with a static "
+                "positive integer."
+            ),
+            "rationale": "task_concurrency_has_no_job_setting",
+        }
     if name == "max_active_runs":
-        if job_max_concurrent_runs(visitor) is not None:
+        if _static_positive_int(visitor.dag_kwargs.get("max_active_runs")) is not None:
             return {
                 "status": "mapped",
                 "target": "job.max_concurrent_runs",

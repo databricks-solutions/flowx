@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from flowx.models.dab import DabNotebook
 from flowx.preparer.activity_preparers.helpers import (
@@ -15,6 +15,28 @@ from flowx.preparer.workspace_downloader import download_dbfs_file
 
 if TYPE_CHECKING:
     from flowx.models.ir import SparkPythonActivity
+
+SERVERLESS_ENVIRONMENT_KEY = "serverless"
+_COMPUTE_FIELDS = ("environment_key", "job_cluster_key", "existing_cluster_id", "new_cluster")
+
+
+def serverless_environment(task: dict[str, Any]) -> list[dict[str, Any]]:
+    """Runs a Python task that names no compute on serverless, returning the job environment it needs.
+
+    Unlike a notebook task, a Python script task must name its compute: a cluster or a job environment.
+    A task whose source asked for no cluster gets the serverless environment; a task with compute is
+    left alone and needs none.
+
+    Args:
+        task: The task dict being prepared; ``environment_key`` is set on it when it names no compute.
+
+    Returns:
+        The ``{environment_key, spec}`` entries the job must declare, empty when the task has compute.
+    """
+    if any(field in task for field in _COMPUTE_FIELDS):
+        return []
+    task["environment_key"] = SERVERLESS_ENVIRONMENT_KEY
+    return [{"environment_key": SERVERLESS_ENVIRONMENT_KEY, "spec": {"environment_version": "5"}}]
 
 
 def _python_placeholder(original_path: str, activity_name: str) -> str:
@@ -57,7 +79,7 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
         if activity.libraries:
             task["libraries"] = activity.libraries
         bind_requested_job_cluster(task, activity)
-        return PreparedActivity(task=task, notebooks=[])
+        return PreparedActivity(task=task, notebooks=[], environments=serverless_environment(task))
     if original_path and ("dbfs:" in original_path or "/" in original_path):
         filename = original_path.rsplit("/", 1)[-1] if "/" in original_path else original_path
     else:
@@ -88,4 +110,4 @@ def prepare(activity: SparkPythonActivity, *, scope: str = "") -> PreparedActivi
     if activity.libraries:
         task["libraries"] = activity.libraries
     bind_requested_job_cluster(task, activity)
-    return PreparedActivity(task=task, notebooks=notebooks)
+    return PreparedActivity(task=task, notebooks=notebooks, environments=serverless_environment(task))

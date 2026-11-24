@@ -36,13 +36,14 @@ from flowx.models.ir import (
 from flowx.sources.airflow import (
     callable_notebook,
     dataproc,
+    papermill,
     shell_dbt,
     shell_environment,
     shell_tools,
     templating,
     teradata,
 )
-from flowx.sources.airflow.template_files import find_template_file, read_template_file
+from flowx.sources.airflow.template_files import find_exported_file, find_template_file, read_template_file
 from flowx.utils import to_lowercase_key
 
 # --------------------------------------------------------------------------------------
@@ -567,8 +568,45 @@ def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note
             description=f"Migrated from Airflow {note}.",
             python_file=app or f"../src/{ctx.task_key}.py",
             parameters=submit.app_args or None,
+            generated_source=_exported_application_source(ctx, app),
         )
     return activity
+
+
+# Paths Databricks itself serves, which package downloads rather than reading from the export.
+_DATABRICKS_PATH_PREFIXES = ("dbfs:", "/dbfs/", "/Workspace/", "/Volumes/")
+
+
+def _exported_application_source(ctx: OperatorContext, application: str) -> str | None:
+    """Returns the source of a spark-submit Python application found in the export, or None.
+
+    A spark-submit usually names the script by its path on the Airflow worker (``/home/<user>/...``), which
+    package cannot download. When discover's folders hold that script, its text is packaged into the bundle
+    instead, the way a papermill notebook or a dbt project is. Remote and Databricks paths keep their usual
+    handling, and so does a script the export does not hold.
+    """
+    if not application.endswith(".py") or "://" in application or application.startswith(_DATABRICKS_PATH_PREFIXES):
+        return None
+    located, _ = find_exported_file(application, ctx.template_search_paths, ctx.source_root)
+    if located is None:
+        return None
+    try:
+        source = located.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    ctx.disclosures.append(
+        {
+            "code": "spark_submit_application_packaged",
+            "task_key": ctx.task_key,
+            "application": application,
+            "local_application": str(located),
+            "rationale": "application_read_from_export",
+            "message": (
+                f"Task {ctx.task_id!r} runs {located.name}, packaged from the export, as a Databricks Python task."
+            ),
+        }
+    )
+    return source
 
 
 # --------------------------------------------------------------------------------------
@@ -891,6 +929,7 @@ def _build_spark_submit(ctx: OperatorContext) -> Activity:
         task_key=ctx.task_key,
         python_file=application or f"../src/{ctx.task_key}.py",
         parameters=args,
+        generated_source=_exported_application_source(ctx, application),
     )
 
 
@@ -902,6 +941,88 @@ def _build_databricks_notebook(ctx: OperatorContext) -> Activity:
         task_key=ctx.task_key,
         notebook_path=path,
         base_parameters={k: str(v) for k, v in params.items()} if isinstance(params, dict) else None,
+    )
+
+
+def _build_papermill(ctx: OperatorContext) -> Activity:
+    """PapermillOperator: run the task's Jupyter notebook as a Databricks notebook task.
+
+    The ``.ipynb`` the task names is found under the folder discover reads, converted to a Databricks
+    notebook (its ``parameters`` cell reads widgets), and packaged into the bundle. ``parameters`` become
+    the task's ``base_parameters``. ``output_nb`` is dropped, since every Databricks job run keeps the
+    executed notebook with its outputs. Anything the conversion can't do deterministically becomes a gap.
+    """
+    constants = papermill.module_constants(ctx.source)
+    notebook_path = papermill.static_value(ctx.kwargs.get("input_nb"), constants)
+    if not isinstance(notebook_path, str):
+        return _placeholder(
+            ctx, "PapermillOperator input_nb could not be read statically; name the notebook with a literal path."
+        )
+    if "{{" in notebook_path:
+        return _placeholder(
+            ctx, f"PapermillOperator input_nb {notebook_path!r} is templated; name the notebook with a literal path."
+        )
+    parameter_values: dict[str, Any] = {}
+    if "parameters" in ctx.kwargs:
+        evaluated = papermill.static_value(ctx.kwargs["parameters"], constants)
+        if not isinstance(evaluated, dict) or not all(isinstance(name, str) for name in evaluated):
+            return _placeholder(
+                ctx, "PapermillOperator parameters could not be read statically; pass a dict of literal values."
+            )
+        parameter_values = evaluated
+    kernel_name = literal_str(ctx.kwargs.get("kernel_name"))
+    if not papermill.is_python_kernel(kernel_name):
+        return _placeholder(ctx, f"PapermillOperator runs the {kernel_name!r} kernel; only Python notebooks convert.")
+    ctx.consumed_arguments.update(name for name in ("kernel_name", "language_name") if name in ctx.kwargs)
+
+    located, detail = papermill.locate_notebook(notebook_path, ctx.template_search_paths, ctx.source_root)
+    if located is None:
+        return _placeholder(
+            ctx,
+            f"PapermillOperator notebook {notebook_path!r} {detail}. Copy the notebook into the folder discover "
+            "reads, then convert again.",
+            {"input_nb": notebook_path},
+        )
+    try:
+        document = _json.loads(located.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as error:
+        return _placeholder(ctx, f"PapermillOperator notebook {located} could not be read as JSON ({error}).")
+    try:
+        converted = papermill.convert_notebook(
+            document, task_id=ctx.task_id, notebook_name=located.name, passed_parameters=parameter_values
+        )
+    except papermill.NotebookConversionError as error:
+        return _placeholder(
+            ctx,
+            f"PapermillOperator notebook {located.name} {error}.",
+            {"input_nb": notebook_path, "resolved_path": str(located)},
+        )
+
+    output_path = papermill.static_value(ctx.kwargs.get("output_nb"), constants)
+    ctx.disclosures.append(
+        {
+            "code": "papermill_notebook_converted",
+            "task_key": ctx.task_key,
+            "input_nb": notebook_path,
+            "local_notebook": str(located),
+            "output_nb": output_path if isinstance(output_path, str) else None,
+            "widgets": list(converted.parameter_names),
+            "conversion_notes": list(converted.notes),
+            "rationale": "databricks_notebook_task_keeps_run_output",
+            "message": (
+                f"Task {ctx.task_id!r} runs {located.name} as a Databricks notebook task. The executed copy papermill "
+                "wrote to output_nb is replaced by the run output every Databricks job run keeps."
+                + (f" Widgets: {', '.join(converted.parameter_names)}." if converted.parameter_names else "")
+                + (f" Changes: {'; '.join(converted.notes)}." if converted.notes else "")
+            ),
+        }
+    )
+    return NotebookActivity(
+        name=ctx.task_id,
+        task_key=ctx.task_key,
+        notebook_path=f"notebooks/{located.stem}.py",
+        base_parameters={name: papermill.parameter_text(value) for name, value in parameter_values.items()} or None,
+        generated_source=converted.source,
     )
 
 
@@ -1127,6 +1248,7 @@ _OPERATOR_CONSUMED_KWARGS: dict[str, frozenset[str]] = {
     "DatabricksRunNowOperator": frozenset({"job_id", "notebook_params", "python_params", "jar_params"}),
     "DatabricksRunNowDeferrableOperator": frozenset({"job_id", "notebook_params", "python_params", "jar_params"}),
     "DatabricksNotebookOperator": frozenset({"notebook_path", "notebook_params"}),
+    "PapermillOperator": frozenset({"input_nb", "output_nb", "parameters"}),
     "DatabricksSqlOperator": frozenset({"sql"}),
     "DatabricksSQLStatementsOperator": frozenset({"sql"}),
     "DatabricksCopyIntoOperator": frozenset({"file_location", "table_name", "file_format"}),
@@ -1297,6 +1419,7 @@ OPERATOR_REGISTRY: dict[str, Callable[[OperatorContext], Activity]] = {
     "DatabricksRunNowOperator": _build_run_now,
     "DatabricksRunNowDeferrableOperator": _build_run_now,
     "DatabricksNotebookOperator": _build_databricks_notebook,
+    "PapermillOperator": _build_papermill,
     "DatabricksSqlOperator": _sql_builder("DatabricksSqlOperator"),
     "DatabricksSQLStatementsOperator": _sql_builder("DatabricksSQLStatementsOperator"),
     "DatabricksCopyIntoOperator": _build_copy_into,

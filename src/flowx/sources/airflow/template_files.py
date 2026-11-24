@@ -8,7 +8,7 @@ because whatever it reads is copied into the migration output.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 @dataclass(slots=True, kw_only=True)
@@ -71,6 +71,72 @@ def read_template_file(name: str, search_paths: tuple[Path, ...]) -> TemplateFil
         return TemplateFile(name=name, path=path, reason=f"could not be read as UTF-8 text ({error})")
     # Airflow's Jinja environment drops a single trailing newline (keep_trailing_newline=False).
     return TemplateFile(name=name, path=path, content=content.removesuffix("\n"))
+
+
+def find_exported_file(path: str, search_paths: tuple[Path, ...], source_root: Path | None) -> tuple[Path | None, str]:
+    """Finds a file a task names by its path on the Airflow machine, reading only inside discover's folders.
+
+    The path usually points at the Airflow worker or a user's home folder (``/home/<user>/...``), which the
+    export copies somewhere else. A relative path follows the template lookup rules. An absolute path is used
+    as-is only when it lies inside the search paths or *source_root*. Otherwise the file is looked for under
+    *source_root* by name; when several files share the name, the one whose trailing folders match the most of
+    the original path wins, and a tie is reported instead of guessed.
+
+    Args:
+        path: The file's path as the DAG names it.
+        search_paths: The DAG folder, then the DAG's ``template_searchpath``.
+        source_root: The folder discover was pointed at.
+
+    Returns:
+        The file's local path and that path as text, or None and the reason it was not found.
+    """
+    roots = tuple(root for root in (*search_paths, source_root) if root is not None)
+    if not PurePosixPath(path).is_absolute():
+        found, _ = find_template_file(path, search_paths)
+        if found is not None:
+            return found, str(found)
+    candidate = Path(path)
+    if candidate.is_absolute() and candidate.is_file() and _inside_any(candidate, roots):
+        return candidate, str(candidate)
+    if source_root is None:
+        return None, "was not found in the DAG folder or template_searchpath"
+    return _match_by_name(PurePosixPath(path), source_root)
+
+
+def _inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(root.resolve()) for root in roots)
+
+
+def _match_by_name(original: PurePosixPath, source_root: Path) -> tuple[Path | None, str]:
+    matches = sorted(
+        path
+        for path in source_root.rglob(f"*{original.suffix}")
+        if path.name == original.name
+        and path.is_file()
+        and ".ipynb_checkpoints" not in path.parts
+        and _inside_any(path, (source_root,))
+    )
+    if not matches:
+        return None, f"was not found at that path or as a file named {original.name!r} under {source_root}"
+    if len(matches) == 1:
+        return matches[0], str(matches[0])
+    scores = {match: _trailing_parts_in_common(original, match.relative_to(source_root)) for match in matches}
+    best = max(scores.values())
+    leaders = [match for match, score in scores.items() if score == best]
+    if len(leaders) == 1 and best > 1:
+        return leaders[0], str(leaders[0])
+    names = ", ".join(str(match.relative_to(source_root)) for match in matches)
+    return None, f"matches {len(matches)} files named {original.name!r} under {source_root} ({names}); keep one"
+
+
+def _trailing_parts_in_common(original: PurePosixPath, found: Path) -> int:
+    count = 0
+    for left, right in zip(reversed(original.parts), reversed(found.parts)):
+        if left != right:
+            break
+        count += 1
+    return count
 
 
 def find_script_file(path: str, search_paths: tuple[Path, ...]) -> tuple[Path | None, str]:

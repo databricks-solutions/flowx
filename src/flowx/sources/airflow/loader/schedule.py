@@ -160,6 +160,8 @@ def static_start_date(node: ast.expr | None, timezone: str | None) -> datetime |
         return None
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
+    if name == "days_ago":
+        return _days_ago_anchor(node)
     if name != "datetime":
         return None
     fields = {field: 0 for field in _DATETIME_FIELDS[3:]}
@@ -178,6 +180,39 @@ def static_start_date(node: ast.expr | None, timezone: str | None) -> datetime |
         zone = ZoneInfo(timezone or "UTC")
         return datetime(**fields, tzinfo=zone).astimezone(dt_timezone.utc)
     except (ValueError, ZoneInfoNotFoundError):
+        return None
+
+
+# A fixed day for anchoring days_ago() starts; any day works, since only the time of day is kept.
+_DAYS_AGO_REFERENCE_DAY = (2000, 1, 1)
+
+
+def _days_ago_anchor(node: ast.Call) -> datetime | None:
+    """Returns an instant on the schedule a ``days_ago(n)`` start date anchors, or None when it is not static.
+
+    Airflow's ``days_ago(n, hour=0, minute=0, second=0)`` returns that UTC time of day, n days before the DAG
+    is parsed. The date moves with each parse, but every value it can return falls on the same time of day,
+    and that is all a schedule anchored to the start date uses. So a fixed day at the same UTC time stands
+    in for it.
+    """
+    arguments = {"n": node.args[0]} if node.args else {}
+    arguments.update({keyword.arg: keyword.value for keyword in node.keywords if keyword.arg is not None})
+    if len(node.args) > 1 or "n" not in arguments or not set(arguments) <= {"n", "hour", "minute", "second"}:
+        return None
+    values: dict[str, int] = {}
+    for field, argument in arguments.items():
+        if not isinstance(argument, ast.Constant) or type(argument.value) is not int:
+            return None
+        values[field] = argument.value
+    try:
+        return datetime(
+            *_DAYS_AGO_REFERENCE_DAY,
+            values.get("hour", 0),
+            values.get("minute", 0),
+            values.get("second", 0),
+            tzinfo=dt_timezone.utc,
+        )
+    except ValueError:
         return None
 
 

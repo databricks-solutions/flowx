@@ -36,6 +36,7 @@ from flowx.sources.airflow.loader.policy import (
     _job_email_notifications,
     _job_timeout_seconds,
     job_max_concurrent_runs,
+    single_task_concurrency,
     template_search_directories,
 )
 from flowx.sources.airflow.loader.reconcile import _iter_placeholders, _semantic_finding
@@ -193,7 +194,11 @@ def _load_airflow_module(
             ),
         }
     concurrency_disclosure: dict[str, Any] | None = None
-    if schedule is not None and "max_active_runs" not in visitor.dag_kwargs:
+    if (
+        schedule is not None
+        and "max_active_runs" not in visitor.dag_kwargs
+        and single_task_concurrency(visitor) is None
+    ):
         concurrency_disclosure = {
             "code": "max_concurrent_runs_defaulted",
             "rationale": "dag_declares_no_max_active_runs",
