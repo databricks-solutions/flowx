@@ -292,3 +292,47 @@ def test_days_ago_start_date_anchors_a_timedelta_schedule(
 
     assert pipeline.schedule["quartz_cron_expression"] == expected
     assert not any(item["details"].get("name") == "default_args.start_date" for item in pipeline.not_translatable)
+
+
+def _fan_out_dag(tmp_path: Path, dag_arguments: str) -> Pipeline:
+    """A prime >> 4 workers >> record DAG, the shape of a locked-partition pipeline."""
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        f"with DAG(dag_id='d', schedule_interval='15 * * * *'{dag_arguments}) as dag:\n"
+        "    prime = BashOperator(task_id='prime', bash_command='echo prime')\n"
+        "    record = BashOperator(task_id='record', bash_command='echo record')\n"
+        "    for worker in range(4):\n"
+        "        process = BashOperator(task_id=f'process_{worker}', bash_command='echo work')\n"
+        "        prime >> process >> record\n",
+        encoding="utf-8",
+    )
+    return load_airflow_dag(dag_path)
+
+
+@pytest.mark.parametrize(
+    ("dag_arguments", "is_gap"),
+    [
+        (", max_active_runs=1, max_active_tasks=4", False),
+        (", max_active_runs=1, max_active_tasks=3", True),
+        (", max_active_runs=2, max_active_tasks=4", True),
+        (", max_active_tasks=4", True),
+    ],
+)
+def test_task_limit_is_dropped_only_when_it_can_never_bind(tmp_path: Path, dag_arguments: str, is_gap: bool) -> None:
+    pipeline = _fan_out_dag(tmp_path, dag_arguments)
+
+    gap = any(item["details"].get("name") == "max_active_tasks" for item in pipeline.not_translatable)
+    assert gap is is_gap
+
+
+def test_parallel_width_counts_the_widest_independent_set() -> None:
+    from flowx.sources.airflow.loader.policy import parallel_width
+
+    chain = [("a", "b"), ("b", "c")]
+    fan_out = [("p", f"w{i}") for i in range(4)] + [(f"w{i}", "r") for i in range(4)]
+
+    assert parallel_width(["a", "b", "c"], chain) == 1
+    assert parallel_width(["p", "w0", "w1", "w2", "w3", "r"], fan_out) == 4
+    assert parallel_width(["x", "y"], []) == 2
