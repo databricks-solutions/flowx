@@ -128,6 +128,26 @@ def test_unsupported_magic_becomes_a_placeholder(tmp_path: Path) -> None:
     assert "%%configure" in task.comment
 
 
+def test_parameters_cell_that_already_reads_widgets_becomes_a_placeholder(tmp_path: Path) -> None:
+    _write_notebook(
+        tmp_path / "widgets.ipynb",
+        [
+            _code('dbutils.widgets.text("limit", "1000")\nlimit = dbutils.widgets.get("limit")', tags=["parameters"]),
+            _code("print(int(limit))"),
+        ],
+    )
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='widgets') as dag:\n"
+        "    PapermillOperator(task_id='widgets', input_nb='widgets.ipynb', output_nb='o.ipynb',\n"
+        "                      parameters={'limit': 500})\n",
+    )
+    task = _by_key(pipeline)["widgets"]
+
+    assert isinstance(task, PlaceholderActivity)
+    assert "already reads dbutils widgets" in task.comment
+
+
 def test_non_python_kernel_becomes_a_placeholder(tmp_path: Path) -> None:
     _write_notebook(tmp_path / "r.ipynb", [_code("print(1)")])
     pipeline = _load_one(

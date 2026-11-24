@@ -27,6 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   any other macro instead of becoming a gap.
 - `{{ }}` text inside a packaged papermill notebook or spark-submit script is no longer reported as unresolved
   Airflow Jinja, since Airflow renders only the operator's arguments.
+- A papermill notebook whose `parameters` cell already reads `dbutils.widgets` becomes a gap instead of getting
+  a second set of widgets, which could lose the DAG's parameter values.
 
 ## [0.1.0]
 

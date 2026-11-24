@@ -464,6 +464,12 @@ def _parameters_cell(text: str, passed_parameters: dict[str, Any]) -> tuple[str,
         module = ast.parse(text)
     except SyntaxError as error:
         raise NotebookConversionError(f"the parameters cell is not valid Python ({error.msg})") from error
+    if "dbutils.widgets" in text:
+        # A cell already rewritten by hand would get a second set of widgets, and the DAG's values could be lost.
+        raise NotebookConversionError(
+            "has a parameters cell that already reads dbutils widgets; restore its plain assignments "
+            "(name = value) so the DAG's parameters map to widgets"
+        )
     lines = [_helper_definition()]
     names: list[str] = []
     for statement in module.body:
