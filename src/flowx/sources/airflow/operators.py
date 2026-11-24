@@ -201,6 +201,9 @@ def _sh_notebook(task_id: str, command: str, env_widgets: dict[str, str] | None 
             export.append(f"dbutils.widgets.text({name!r}, '')")
             export.append(f"os.environ[{name!r}] = dbutils.widgets.get({name!r})")
         header += "\n".join(export) + "\n\n# COMMAND ----------\n\n"
+    else:
+        # Databricks runs a cell as %sh only when the magic is its first line, so the header gets its own cell.
+        header += "# COMMAND ----------\n\n"
     lines = "".join(f"# MAGIC {_sanitize_sh_line(line)}\n" for line in command.splitlines())
     return header + "# MAGIC %sh\n" + lines
 

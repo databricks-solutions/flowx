@@ -156,9 +156,29 @@ def test_parameters_without_a_parameters_cell_are_injected_at_the_top() -> None:
     )
 
     assert converted.parameter_names == ["region"]
-    body = converted.source.split("# COMMAND ----------")
-    assert "region = _papermill_parameter('region', '', as_text=True)" in body[0]
-    assert "print(region)" in body[1]
+    cells = _cells(converted.source)
+    assert cells[0].startswith("# Migrated from Airflow PapermillOperator 't'")
+    assert "region = _papermill_parameter('region', '', as_text=True)" in cells[1]
+    assert "print(region)" in cells[2]
+
+
+def test_every_magic_cell_starts_with_its_magic() -> None:
+    # Databricks reads a cell as markdown, SQL, or shell only when the magic is the cell's first line.
+    document = _document(
+        [
+            _markdown("# Title\nSome text."),
+            _code("!pip install tqdm"),
+            _code("%%sql\nselect 1"),
+            _code("%%bash\necho hi"),
+            _code("print(1)"),
+        ]
+    )
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    magic_cells = [cell for cell in _cells(converted.source) if "# MAGIC" in cell]
+    assert len(magic_cells) == 4
+    assert all(cell.startswith("# MAGIC %") for cell in magic_cells)
 
 
 def test_locate_notebook_prefers_the_longest_matching_folder_path(tmp_path: Path) -> None:
@@ -185,6 +205,12 @@ def _load_one(root: Path, dag_source: str, *, dag_folder: str = ".") -> object:
     pipelines = load_airflow_dags(dag_path, source_root=root)
     assert len(pipelines) == 1
     return pipelines[0]
+
+
+def _cells(source: str) -> list[str]:
+    """Splits Databricks notebook source into its cells, without the file header."""
+    body = source.removeprefix("# Databricks notebook source\n")
+    return [cell.strip("\n") for cell in body.split("# COMMAND ----------")]
 
 
 def _by_key(pipeline: object) -> dict[str, object]:

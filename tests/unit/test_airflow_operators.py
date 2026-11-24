@@ -194,6 +194,9 @@ def test_bash_operator_becomes_sh_notebook():
     assert "%sh" in task.generated_source
     # No macros -> no widget prelude, just the %sh cell.
     assert "dbutils.widgets" not in task.generated_source
+    # Databricks runs a cell as %sh only when the magic is its first line, so the header is its own cell.
+    sh_cell = task.generated_source.split("# COMMAND ----------")[-1].strip("\n")
+    assert sh_cell.startswith("# MAGIC %sh\n")
 
 
 def test_bash_operator_macros_thread_through_shell_env_vars():

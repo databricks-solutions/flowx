@@ -48,6 +48,7 @@ _TIMING_LINE_MAGICS = ("%time ", "%timeit ")
 _PIP_PREFIXES = ("!pip ", "%pip ", "!pip3 ", "!python -m pip ", "!python3 -m pip ")
 
 _PYTHON_KERNEL_PREFIXES = ("python", "py", "ipykernel", "pyspark", "spark")
+_CELL_SEPARATOR = "\n# COMMAND ----------\n\n"
 _PARAMETER_HELPER = "_papermill_parameter"
 
 
@@ -321,11 +322,12 @@ def convert_notebook(
     if saw_parameters_cell:
         converted.notes.append("rewrote the parameters cell to read widgets, keeping its values as widget defaults")
 
-    header = (
-        "# Databricks notebook source\n"
-        f"# Migrated from Airflow PapermillOperator '{task_id}' (notebook {notebook_name}).\n\n"
+    # The provenance comment gets a cell of its own: Databricks reads a cell as markdown or SQL only when the
+    # magic is the cell's first line, so a comment above it turns the whole cell back into Python.
+    provenance = f"# Migrated from Airflow PapermillOperator '{task_id}' (notebook {notebook_name}).\n"
+    converted.source = "# Databricks notebook source\n" + _CELL_SEPARATOR.join(
+        cell.rstrip("\n") + "\n" for cell in [provenance, *cells]
     )
-    converted.source = header + "\n# COMMAND ----------\n\n".join(cell.rstrip("\n") + "\n" for cell in cells)
     converted.parameter_names = declared
     return converted
 
@@ -434,7 +436,7 @@ def _lines_inside_strings(lines: list[str]) -> set[int]:
 
 def _pip_cell(pip_lines: list[str]) -> str:
     # Databricks runs one %pip command per cell, so each install keeps its own cell.
-    return "\n# COMMAND ----------\n\n".join(f"# MAGIC {line}\n" for line in pip_lines)
+    return _CELL_SEPARATOR.join(f"# MAGIC {line}\n" for line in pip_lines)
 
 
 def _helper_definition() -> str:
