@@ -21,6 +21,8 @@ _RESOURCE_SUFFIXES = frozenset({".sql", ".py", ".yml", ".yaml", ".md", ".csv"})
 _ENV_VAR = re.compile(r"""env_var\(\s*['"]([^'"]+)['"]\s*\)""")
 # Files that declare dbt packages, which a fresh task environment installs with ``dbt deps``.
 _PACKAGE_FILES = ("packages.yml", "dependencies.yml")
+# A YAML file name that suggests credentials, such as ``secrets.yml``, left out of a copy of the project root.
+_CREDENTIAL_NAME = re.compile(r"secret|credential", re.IGNORECASE)
 # The most commands a Databricks dbt task runs.
 MAX_TASK_COMMANDS = 10
 # The dbt_project.yml settings that name the project's folders, with dbt's defaults.
@@ -41,13 +43,14 @@ def tree_artifacts(
     destination_root: str,
     *,
     excluded_paths: frozenset[str] = frozenset(),
+    excluded_names: frozenset[str] = frozenset(),
     suffixes: frozenset[str] | None = None,
 ) -> list[DabNotebook]:
     """Returns bundle artifacts for files beneath a local source directory.
 
     Hidden files and folders (``.env``, ``.git``, ...) and files under build, cache, and log folders are
-    skipped, as are *excluded_paths* (relative to *source_root*) and the files under them. With *suffixes*, only
-    files with one of those suffixes are kept.
+    skipped, as are *excluded_paths* (relative to *source_root*) and the files under them, and files and folders
+    named in *excluded_names* at any depth. With *suffixes*, only files with one of those suffixes are kept.
     """
     if not source_root.is_dir():
         return []
@@ -61,6 +64,7 @@ def tree_artifacts(
         and not source.is_symlink()
         and not (_EXCLUDED_DBT_PATH_PARTS & set(source.relative_to(source_root).parts))
         and not _under_any(source.relative_to(source_root).as_posix(), excluded_paths)
+        and not (excluded_names & set(source.relative_to(source_root).parts))
         and not any(part.startswith(".") for part in source.relative_to(source_root).parts)
         and (suffixes is None or source.suffix in suffixes)
     ]
@@ -168,10 +172,10 @@ def _packages_folder(settings: dict) -> str:
 
 
 def _root_exclusions(project: Path, settings: dict, *, include_packages: bool) -> frozenset[str]:
-    """Returns what a copy of the whole project root leaves out, as paths relative to the root.
+    """Returns the folders a copy of the whole project root leaves out, as paths relative to the root.
 
-    That is ``profiles.yml``, dbt's build and log output, installed packages unless *include_packages*, and any
-    Python virtual environment at the top of the project.
+    That is dbt's build and log output, installed packages unless *include_packages*, and any Python or conda
+    environment at the top of the project.
     """
     folders = [
         value
@@ -180,8 +184,10 @@ def _root_exclusions(project: Path, settings: dict, *, include_packages: bool) -
     ]
     if not include_packages:
         folders.append(_packages_folder(settings))
-    environments = [child.name for child in project.iterdir() if (child / "pyvenv.cfg").is_file()]
-    return frozenset({"profiles.yml", *environments, *(_relative_folder(folder) for folder in folders)})
+    environments = [
+        child.name for child in project.iterdir() if (child / "pyvenv.cfg").is_file() or (child / "conda-meta").is_dir()
+    ]
+    return frozenset({*environments, *(_relative_folder(folder) for folder in folders)})
 
 
 def project_artifacts(project: Path, destination_root: str, *, include_packages: bool = False) -> list[DabNotebook]:
@@ -192,8 +198,8 @@ def project_artifacts(project: Path, destination_root: str, *, include_packages:
     Anything else in the project folder, such as ``profiles.yml``, a ``.env`` file, or a credentials file,
     is left out, and so is a folder that would lead outside the project. A setting that names the project root,
     such as ``model-paths: ["."]``, copies the dbt resource files (SQL, Python, YAML, Markdown, and CSV) found
-    under the root, since dbt reads them all, without ``profiles.yml``, installed packages, build and log
-    output, or Python virtual environments.
+    under the root, since dbt reads them all, without ``profiles.yml`` or files named like credentials at any
+    depth, installed packages, build and log output, or Python and conda environments.
     """
     artifacts = [
         DabNotebook(relative_path=f"{destination_root}/{name}", binary_content=(project / name).read_bytes())
@@ -207,9 +213,19 @@ def project_artifacts(project: Path, destination_root: str, *, include_packages:
         if not source.is_relative_to(root):
             continue
         if source == root:
-            excluded = _root_exclusions(project, settings, include_packages=include_packages)
             artifacts.extend(
-                tree_artifacts(project, destination_root, excluded_paths=excluded, suffixes=_RESOURCE_SUFFIXES)
+                artifact
+                for artifact in tree_artifacts(
+                    project,
+                    destination_root,
+                    excluded_paths=_root_exclusions(project, settings, include_packages=include_packages),
+                    excluded_names=frozenset({"profiles.yml"} | (set() if include_packages else {"dbt_packages"})),
+                    suffixes=_RESOURCE_SUFFIXES,
+                )
+                if not (
+                    Path(artifact.relative_path).suffix in {".yml", ".yaml"}
+                    and _CREDENTIAL_NAME.search(Path(artifact.relative_path).stem)
+                )
             )
         else:
             artifacts.extend(tree_artifacts(project / folder, f"{destination_root}/{folder}"))

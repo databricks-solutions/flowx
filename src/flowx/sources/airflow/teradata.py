@@ -117,7 +117,28 @@ def _strip_heredocs(command: str) -> str:
 
 
 # Shell operators, longest first. shlex joins adjacent punctuation, so ``);`` arrives as one token.
-_OPERATORS = (">>", "<<", "&&", "||", ";;", "&>", ">&", "<&", "<>", ">|", "|&", ";", "&", "|", "(", ")", "<", ">")
+_OPERATORS = (
+    ";;&",
+    ">>",
+    "<<",
+    "&&",
+    "||",
+    ";;",
+    ";&",
+    "&>",
+    ">&",
+    "<&",
+    "<>",
+    ">|",
+    "|&",
+    ";",
+    "&",
+    "|",
+    "(",
+    ")",
+    "<",
+    ">",
+)
 _OPERATOR_CHARACTERS = frozenset("();<>|&")
 
 
@@ -133,10 +154,17 @@ def _split_operators(word: str) -> list[str]:
     return operators
 
 
+# Two words side by side, as in ``cd x``, which an arithmetic expression never has.
+_ADJACENT_WORDS = re.compile(r"[A-Za-z_][\w./-]*\s+[A-Za-z_./]")
+_COMMAND_SUBSTITUTION = re.compile(r"\$\([^()]*\)|`[^`]*`")
+
+
 def _mask_arithmetic(command: str) -> str:
     """Replaces each ``$(( ... ))`` expansion with ``0`` and each ``(( ... ))`` command with ``:``.
 
-    Arithmetic holds expressions, not commands, so ``i++`` or ``START + 10`` must not be read as programs.
+    Arithmetic holds expressions, not commands, so ``i++`` or ``START + 10`` must not be read as programs. A
+    command substitution inside it, as in ``$(( $(wc -l < f) + 1 ))``, is kept, and text in ``((`` that
+    reads as commands, such as the nested subshell ``((cd x && make) )``, is left as it is.
     """
     output: list[str] = []
     index = 0
@@ -155,7 +183,13 @@ def _mask_arithmetic(command: str) -> str:
         if depth:
             output.append(command[index:])
             break
-        output.append("0" if expansion else " : ")
+        inner = command[start : end - 2]
+        if _ADJACENT_WORDS.search(_COMMAND_SUBSTITUTION.sub(" 0 ", inner)):
+            output.append(command[index])
+            index += 1
+            continue
+        substitutions = " ".join(_COMMAND_SUBSTITUTION.findall(inner))
+        output.append(f"0 {substitutions}" if expansion else f" : {substitutions} ")
         index = end
     return "".join(output)
 
@@ -207,6 +241,9 @@ def _command_start(words: list[str]) -> int:
         name = _command_name(word)
         if word in _KEYWORDS or _ASSIGNMENT.match(word):
             index += 1
+        elif word == "function" and index + 1 < len(words):
+            # ``function name { ...; }`` defines a function; its body is the commands after ``{``.
+            index += 2
         elif name in _PREFIX_COMMANDS:
             index += 1
             while index < len(words) and (words[index].startswith("-") or _ASSIGNMENT.match(words[index])):

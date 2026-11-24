@@ -1027,7 +1027,12 @@ def _require_airflow_baseline(payload: Any) -> None:
         if not isinstance(pipeline, dict) or (pipeline.get("tags") or {}).get("source") != "airflow":
             raise AgenticContractError("resolve-agentic requires a canonical Airflow translation report")
         status = pipeline.get("reconciliation_status")
-        if status not in {"verified", "verified_with_gaps", "excluded"}:
+        # An excluded DAG is not migrated, so it may have failed reconciliation.
+        if pipeline.get("migration_status") != "excluded" and status not in {
+            "verified",
+            "verified_with_gaps",
+            "excluded",
+        }:
             raise AgenticContractError(
                 f"Agentic resolution requires a successfully reconciled deterministic report, got {status!r}"
             )

@@ -232,6 +232,7 @@ def imported_sources(node: ast.AST, imports: dict[str, ImportedName], roots: tup
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
     chained: set[int] = set()
+    resolved_chains: set[str] = set()
     for name in ast.walk(node):
         if isinstance(name, ast.Attribute) and id(name) not in chained:
             dotted, start = _dotted_name(name)
@@ -243,11 +244,14 @@ def imported_sources(node: ast.AST, imports: dict[str, ImportedName], roots: tup
             if imported is None or imported.attribute is not None or not _is_project_import(imported):
                 continue
             key = ".".join(dotted)
-            record = _resolve_module_attribute(imported, dotted, roots) if key not in seen else None
-            seen.add(key)
-            if record is not None:
+            if key not in seen:
+                seen.add(key)
+                record = _resolve_module_attribute(imported, dotted, roots)
+                if record is not None:
+                    resolved_chains.add(key)
+                    records.append(record)
+            if key in resolved_chains:
                 chained.add(id(start))
-                records.append(record)
             continue
         if not isinstance(name, ast.Name) or name.id in seen or id(name) in chained:
             continue

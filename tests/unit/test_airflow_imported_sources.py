@@ -204,3 +204,21 @@ def test_attribute_of_a_call_result_does_not_hide_an_imported_module(tmp_path: P
     records = imported_sources(expression, imports, search_roots(tmp_path / "dags" / "dag.py", tmp_path / "dags"))
 
     assert [record["name"] for record in records] == ["utils"]
+
+
+def test_dotted_operator_used_twice_attaches_only_its_class(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "dags/dag.py": "import company.ops.custom\n",
+            "dags/company/__init__.py": "VALUE = 1\n",
+            "dags/company/ops/__init__.py": "",
+            "dags/company/ops/custom.py": "class Load:\n    pass\n",
+        },
+    )
+    imports = import_table(ast.parse("import company.ops.custom\n"))
+    expression = ast.parse("company.ops.custom.Load(task_id='a', kind=company.ops.custom.Load)", mode="eval").body
+
+    records = imported_sources(expression, imports, search_roots(tmp_path / "dags" / "dag.py", tmp_path / "dags"))
+
+    assert [record["name"] for record in records] == ["company.ops.custom.Load"]

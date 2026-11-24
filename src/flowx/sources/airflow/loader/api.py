@@ -11,6 +11,7 @@ from flowx.models.ir import (
     PlaceholderActivity,
     RunJobActivity,
 )
+from flowx.skipped_dags import UNNAMED_DAG_FINDINGS
 from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow.loader.ast_utils import _expand_top_level_loops
 from flowx.sources.airflow.loader.dag_discovery import (
@@ -139,36 +140,60 @@ def load_pipelines(
 
 
 def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[str]) -> None:
-    """Replaces included-to-excluded run-job references with explicit placeholders."""
+    """Replaces included-to-excluded run-job references with explicit placeholders.
+
+    Only a task that triggers a DAG by name counts, not one that runs an existing Databricks job by id. When an
+    excluded file is a DAG generator, whose DAGs flowx cannot name, a trigger of any DAG that is not in this
+    migration counts too, since it may target one of them.
+    """
     excluded_by_key = {to_lowercase_key(name): name for name in excluded}
+    generator_excluded = any(
+        pipeline.migration_status == "excluded"
+        and any(finding.get("code") in UNNAMED_DAG_FINDINGS for finding in pipeline.not_translatable)
+        for pipeline in pipelines
+    )
+    included_keys = {
+        to_lowercase_key(pipeline.name) for pipeline in pipelines if pipeline.migration_status != "excluded"
+    }
     for pipeline in pipelines:
         if pipeline.migration_status == "excluded":
             continue
         for index, task in enumerate(pipeline.tasks):
-            if isinstance(task, RunJobActivity) and task.job_name in excluded_by_key:
+            if not isinstance(task, RunJobActivity) or task.existing_job_id:
+                continue
+            if task.job_name in excluded_by_key:
                 excluded_name = excluded_by_key[task.job_name]
-                placeholder = PlaceholderActivity(
-                    name=task.name,
-                    task_key=task.task_key,
-                    depends_on=task.depends_on,
-                    original_type="ExcludedDagReference",
-                    comment=f"Referenced Airflow DAG {excluded_name!r} was excluded from this migration.",
-                    raw_definition={"excluded_dag": excluded_name},
+                comment = f"Referenced Airflow DAG {excluded_name!r} was excluded from this migration."
+            elif generator_excluded and task.job_name not in included_keys:
+                excluded_name = task.job_name
+                comment = (
+                    f"Referenced Airflow DAG {excluded_name!r} is not in this migration and may be built by an "
+                    "excluded DAG generator file."
                 )
-                pipeline.tasks[index] = placeholder
-                entry = source_audit.finding(
-                    source_file=str(pipeline.audit.get("source_file", "")),
-                    code="excluded_dag_reference",
-                    severity="gap",
-                    message=f"Task {task.task_key!r} references excluded DAG {excluded_name!r}.",
-                    details={"task_key": task.task_key, "excluded_dag": excluded_name},
-                )
-                pipeline.not_translatable.append(entry)
-                if pipeline.reconciliation_status != "failed":
-                    pipeline.reconciliation_status = "verified_with_gaps"
-                pause_unfinished_schedule(pipeline)
-                pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
-                pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
+            else:
+                continue
+            placeholder = PlaceholderActivity(
+                name=task.name,
+                task_key=task.task_key,
+                depends_on=task.depends_on,
+                original_type="ExcludedDagReference",
+                comment=comment,
+                raw_definition={"excluded_dag": excluded_name},
+            )
+            pipeline.tasks[index] = placeholder
+            entry = source_audit.finding(
+                source_file=str(pipeline.audit.get("source_file", "")),
+                code="excluded_dag_reference",
+                severity="gap",
+                message=f"Task {task.task_key!r} references excluded DAG {excluded_name!r}.",
+                details={"task_key": task.task_key, "excluded_dag": excluded_name},
+            )
+            pipeline.not_translatable.append(entry)
+            if pipeline.reconciliation_status != "failed":
+                pipeline.reconciliation_status = "verified_with_gaps"
+            pause_unfinished_schedule(pipeline)
+            pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
+            pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
 
 
 def discover_dags(source_path: Path) -> list[Path]:

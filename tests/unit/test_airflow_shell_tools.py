@@ -36,6 +36,12 @@ from flowx.sources.airflow.shell_tools import unavailable_programs
         ('case "full" in full) echo f;; *) echo i;; esac', []),
         ("case $MODE in (a|b) sqlcmd -Q 1 ;; c) echo c ;; esac", ["sqlcmd"]),
         ("function load { cp a b; }; load", []),
+        ("function load { sqlcmd -S db; }; load", ["sqlcmd"]),
+        ("function run() { bteq < job.bteq; }; run", ["bteq"]),
+        ("X=$(( $(sqlcmd -Q x) + 1 ))", ["sqlcmd"]),
+        ("((cd x && sqlcmd) )", ["sqlcmd"]),
+        ("case $1 in a) echo a ;& b) echo b ;; esac", []),
+        ("case $1 in a) echo a ;;& b) sqlcmd ;; esac", ["sqlcmd"]),
         ("iconv -f latin1 -t utf8 a > b && perl -pe 's/x/y/' b && chown x b", []),
     ],
 )

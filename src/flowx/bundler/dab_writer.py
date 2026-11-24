@@ -66,7 +66,11 @@ from flowx.preparer.workspace_downloader import (
     prompt_for_auth_if_missing,
     set_profile,
 )
-from flowx.skipped_dags import failed_airflow_pipelines, without_skipped_dag_references
+from flowx.skipped_dags import (
+    failed_airflow_pipelines,
+    unpackaged_trigger_targets,
+    without_skipped_dag_references,
+)
 from flowx.utils import to_lowercase_key
 
 
@@ -3035,6 +3039,7 @@ def _load_report(
         # pipeline, each already in the single-pipeline {"name", "tasks", ...} IR shape. Route each
         # through the same machinery the single-pipeline branch uses. Mirrors the adapter's
         # _load_pipelines (adapter/__main__.py) so both report consumers agree on this shape.
+        unpackaged_targets = unpackaged_trigger_targets(report, skipped_dags)
         for index, pipeline_dict in enumerate(report["pipelines"]):
             if isinstance(pipeline_dict, dict) and "tasks" in pipeline_dict and "name" in pipeline_dict:
                 # Excluded pipelines (e.g. --exclude-dag) emit no Job by design; drop them without
@@ -3042,7 +3047,9 @@ def _load_report(
                 if pipeline_dict.get("migration_status") == "excluded" or pipeline_dict["name"] in skipped_dags:
                     continue
                 if skipped_dags:
-                    pipeline_dict = without_skipped_dag_references(pipeline_dict, skipped_dags)
+                    pipeline_dict = without_skipped_dag_references(
+                        pipeline_dict, skipped_dags, unpackaged_targets=unpackaged_targets
+                    )
                 workflows.append(_pipeline_dict_to_workflow(pipeline_dict))
             else:
                 # A non-conforming entry (corruption / an internal bug) is skipped so the other
@@ -3089,7 +3096,8 @@ def _report_reconciliation_failures(
     Packaging is a security boundary for source reconciliation. A malformed report or an
     unrecognized status must fail closed rather than falling through as an empty/safe report.
     A failed Airflow pipeline named in *skipped_dags* is not a failure, since it is left out of
-    the bundle; every other check still applies to it.
+    the bundle; every other check still applies to it. A task that triggers it becomes a placeholder, which
+    counts as an unresolved gap, as for a DAG excluded with ``--exclude-dag``.
     """
     try:
         with report_path.open(encoding="utf-8") as handle:
@@ -3160,6 +3168,7 @@ def _report_reconciliation_failures(
     failures: list[str] = []
     airflow_statuses = {"verified", "verified_with_gaps", "verified_with_reviewed_resolutions", "failed"}
     required_airflow_audit_fields = {"source_file", "audited_activity_count", "transformations"}
+    unpackaged_targets = unpackaged_trigger_targets(report, skipped_dags) if skipped_dags else None
     for index, pipeline in enumerate(pipelines):
         label = f"pipeline[{index}]"
         if not isinstance(pipeline, dict):
@@ -3215,6 +3224,17 @@ def _report_reconciliation_failures(
         if gap_findings and not counts["accepted_count"] and not allow_unresolved_gaps:
             failures.append(
                 f"{label}: unresolved Airflow gaps require an accepted agentic candidate or --allow-unresolved-gaps"
+            )
+        elif (
+            skipped_dags
+            and not counts["accepted_count"]
+            and not allow_unresolved_gaps
+            and without_skipped_dag_references(pipeline, skipped_dags, unpackaged_targets=unpackaged_targets)
+            is not pipeline
+        ):
+            failures.append(
+                f"{label}: tasks that trigger a DAG left out by --skip-failed-dags become placeholders, which "
+                "require an accepted agentic candidate or --allow-unresolved-gaps"
             )
         if status != "failed":
             continue

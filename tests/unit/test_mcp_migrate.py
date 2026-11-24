@@ -1234,51 +1234,93 @@ def _failed_airflow_pipeline(name: str) -> dict:
     }
 
 
-def test_airflow_migrate_skipping_failed_dags_ignores_their_gaps_and_packages(monkeypatch, tmp_path: Path):
-    output = tmp_path / "out"
-    calls: list[list[str]] = []
-    verified = {
-        "name": "good",
-        "tags": {"source": "airflow"},
-        "reconciliation_status": "verified",
-        "tasks": [],
-        "not_translatable": [],
-        "audit": {"audited_activity_count": 0, "transformations": []},
-    }
+_SKIP_HEADER = (
+    "from datetime import datetime\n"
+    "from airflow import DAG\n"
+    "from airflow.operators.bash import BashOperator\n"
+    "from airflow.operators.trigger_dagrun import TriggerDagRunOperator\n"
+)
+_SKIP_SCHEDULE = "start_date=datetime(2024, 1, 1), schedule='@daily', catchup=False, max_active_runs=1"
+_SKIP_DAGS = {
+    "good.py": _SKIP_HEADER
+    + f"with DAG('good', {_SKIP_SCHEDULE}) as dag:\n    BashOperator(task_id='hi', bash_command='echo hi')\n",
+    "bad.py": _SKIP_HEADER
+    + f"with DAG('bad', {_SKIP_SCHEDULE}) as dag:\n"
+    + "    tasks = [BashOperator(task_id=f't{i}', bash_command='echo hi') for i in range(2)]\n",
+}
+_SKIP_CALLER = (
+    _SKIP_HEADER + f"with DAG('caller', {_SKIP_SCHEDULE}) as dag:\n"
+    "    BashOperator(task_id='hi', bash_command='echo hi') >> "
+    "TriggerDagRunOperator(task_id='kick', trigger_dag_id='bad')\n"
+)
 
-    def fake_run_adapter(args):
-        argv = [str(value) for value in args]
-        calls.append(argv)
-        if argv[0] == "convert":
-            report_path = output / ".work" / "translation_report.json"
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(
-                json.dumps({"pipelines": [verified, _failed_airflow_pipeline("bad")]}), encoding="utf-8"
-            )
-        if argv[0] == "package":
-            return _FakeResult()
-        return _FakeResult()
 
-    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
-    monkeypatch.setattr(runner, "summarize_inventory", lambda _out: {"pipeline_count": 2})
-    monkeypatch.setattr(runner, "summarize_translation", lambda _out: {"pipelines": 2})
-    monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
-    monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
-
-    result = server._cmd_migrate(
+def _skip_migrate(tmp_path: Path, files: dict[str, str]) -> dict:
+    source = tmp_path / "dags"
+    source.mkdir()
+    for name, content in files.items():
+        (source / name).write_text(content, encoding="utf-8")
+    return server._cmd_migrate(
         {
             "source": "airflow",
-            "airflow_source_path": str(tmp_path / "dags"),
-            "output_dir": str(output),
+            "airflow_source_path": str(source),
+            "output_dir": str(tmp_path / "out"),
+            "interactive": False,
             "skip_failed_dags": True,
         }
     )
 
+
+def test_airflow_migrate_skipping_failed_dags_packages_the_others(tmp_path: Path):
+    result = _skip_migrate(tmp_path, _SKIP_DAGS)
+
     assert result["ok"] is True
     assert result["status"] == "packaged_without_failed_dags"
     assert result["left_out_dags"] == ["bad"]
-    assert [argv[0] for argv in calls] == ["discover", "convert", "package"]
-    assert "--skip-failed-dags" in calls[-1]
+    assert (tmp_path / "out" / "resources" / "good.yml").is_file()
+    assert not (tmp_path / "out" / "resources" / "bad.yml").exists()
+
+
+def test_airflow_migrate_without_skipping_stops_at_a_failed_dag(tmp_path: Path):
+    source = tmp_path / "dags"
+    source.mkdir()
+    for name, content in _SKIP_DAGS.items():
+        (source / name).write_text(content, encoding="utf-8")
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(source),
+            "output_dir": str(tmp_path / "out"),
+            "interactive": False,
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["failed_phase"] == "discover"
+
+
+def test_airflow_migrate_skipping_failed_dags_reports_triggers_of_them_as_excluded_references(tmp_path: Path):
+    result = _skip_migrate(tmp_path, {**_SKIP_DAGS, "caller.py": _SKIP_CALLER})
+
+    assert result["status"] == "needs_agentic_resolution"
+    assert result["left_out_dags"] == ["bad"]
+    assert [gap["code"] for gap in result["structural_gaps"]] == ["excluded_dag_reference"]
+
+
+def test_airflow_migrate_skipping_failed_dags_prepares_gaps_in_the_others(tmp_path: Path):
+    caller = _SKIP_CALLER.replace(
+        "BashOperator(task_id='hi', bash_command='echo hi')", "SSHOperator(task_id='s', ssh_conn_id='x', command='ls')"
+    ).replace(
+        "from airflow.operators.bash",
+        "from airflow.providers.ssh.operators.ssh import SSHOperator\nfrom airflow.operators.bash",
+    )
+
+    result = _skip_migrate(tmp_path, {**_SKIP_DAGS, "caller.py": caller})
+
+    assert result["status"] == "needs_agentic_resolution"
+    assert [gap["operator"] for gap in result["eligible_gaps"]] == ["SSHOperator"]
+    assert result["left_out_dags"] == ["bad"]
 
 
 def test_package_reports_unresolved_gaps_before_left_out_dags(monkeypatch, tmp_path: Path):
