@@ -21,11 +21,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from flowx.ir_serde import pipeline_to_dict
-from flowx.sources.airflow.loader import discover_dags, load_pipelines
+from flowx.sources.airflow.loader import load_pipelines
 
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
+AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE = 3
 _PROVIDER_MANIFEST_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.json")
 _PROVIDER_PIN_FIELD = "flowx_pin"
 
@@ -40,6 +41,19 @@ _TASK_POLICY_FINDING_CODES = {"unrepresented_task_policy"}
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
 _DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored", "needs_input"}
 _MAX_GENERATED_FILE_BYTES = 1024 * 1024
+_MAX_SOURCE_SNAPSHOT_FILES = 10_000
+_MAX_SOURCE_SNAPSHOT_BYTES = 100 * 1024 * 1024
+_MAX_SOURCE_SNAPSHOT_FILE_BYTES = 10 * 1024 * 1024
+_IGNORED_SOURCE_DIRECTORIES = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
 _COMMON_TASK_FIELDS = (
     "name",
     "task_key",
@@ -78,6 +92,7 @@ def airflow_gap_findings(report: Any) -> list[dict[str, Any]]:
         if isinstance(pipeline, dict)
         and isinstance(pipeline.get("tags"), dict)
         and pipeline["tags"].get("source") == "airflow"
+        and pipeline.get("migration_status", "included") != "excluded"
         for finding in pipeline.get("not_translatable") or []
         if isinstance(finding, dict) and finding.get("severity") == "gap"
     ]
@@ -93,7 +108,7 @@ def classify_airflow_gaps(
         pipelines = [report] if isinstance(report, dict) else []
     findings: list[tuple[str, dict[str, Any]]] = []
     for pipeline in pipelines:
-        if not isinstance(pipeline, dict):
+        if not isinstance(pipeline, dict) or pipeline.get("migration_status", "included") == "excluded":
             continue
         pipeline_name = str(pipeline.get("name", ""))
         findings.extend(
@@ -130,18 +145,18 @@ def classify_airflow_gaps(
         if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
             continue
         code = str(finding.get("code", ""))
-        unsupported.append(
-            {
-                "gap_id": fingerprint,
-                "pipeline_name": pipeline_name,
-                "code": code,
-                "message": str(finding.get("message", "")),
-                "source_span": {key: finding.get(key, 0) for key in ("line", "column", "end_line", "end_column")},
-                "details": finding.get("details") or {},
-                "resolution_support": "unsupported_by_leaf_contract",
-                "required_capability": airflow_finding_required_capability({code}) or "source_semantics",
-            }
-        )
+        required_capability = airflow_finding_required_capability({code})
+        classified_finding = {
+            "gap_id": fingerprint,
+            "pipeline_name": pipeline_name,
+            "code": code,
+            "message": str(finding.get("message", "")),
+            "source_span": {key: finding.get(key, 0) for key in ("line", "column", "end_line", "end_column")},
+            "details": finding.get("details") or {},
+            "resolution_support": "unsupported_by_leaf_contract",
+            "required_capability": required_capability or "source_semantics",
+        }
+        (structural if required_capability else unsupported).append(classified_finding)
     return {"eligible_gaps": eligible, "structural_gaps": structural, "unsupported_gaps": unsupported}
 
 
@@ -186,6 +201,10 @@ _UNSET = object()
 
 class AgenticContractError(ValueError):
     """Raised when an agentic workspace or resolution violates the contract."""
+
+
+class AirflowSourceReproducibilityError(AgenticContractError):
+    """Raised when a source snapshot cannot reproduce its deterministic Airflow report."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -282,7 +301,8 @@ def prepare_airflow_resolutions(
     gap_id: str | None = None,
 ) -> dict[str, Any]:
     """Snapshots source and an exactly reproducible deterministic report, then emits GapEnvelope v1."""
-    source_path = source_path.resolve()
+    requested_source_path = source_path.absolute()
+    source_path = requested_source_path.resolve()
     report_path = report_path.resolve()
     output_dir = output_dir.resolve()
     if not source_path.exists():
@@ -296,9 +316,10 @@ def prepare_airflow_resolutions(
         raise AgenticContractError(f"Deterministic report contains invalid JSON: {error}") from error
     _require_airflow_baseline(baseline)
 
-    source_files = _source_files(source_path)
+    source_files, omitted_source_files = _source_snapshot(source_path, excluded_roots=(output_dir,))
     if not source_files:
         raise AgenticContractError(f"No Airflow DAG files found under {source_path}")
+    source_entry_path = source_path.name if source_path.is_file() else None
     source_hashes = {relative: _sha256_file(path) for relative, path in source_files}
     baseline_hash = _sha256_bytes(baseline_bytes)
     provider_source = _provider_context_path()
@@ -316,11 +337,24 @@ def prepare_airflow_resolutions(
             shutil.copy2(path, destination)
         if {relative: _sha256_file(snapshot / relative) for relative in source_hashes} != source_hashes:
             raise AgenticContractError("Airflow source changed while the agentic snapshot was being created")
+        verified_source_files, verified_omitted_source_files = _source_snapshot(
+            source_path,
+            excluded_roots=(output_dir,),
+        )
+        if {
+            relative: _sha256_file(path) for relative, path in verified_source_files
+        } != source_hashes or verified_omitted_source_files != omitted_source_files:
+            raise AgenticContractError("Airflow source changed while the agentic snapshot was being created")
 
-        snapshot_source = snapshot / source_files[0][0] if source_path.is_file() else snapshot
+        snapshot_source = snapshot / source_entry_path if source_entry_path is not None else snapshot
         rebuilt = _rebuild_airflow_report(snapshot_source, baseline, dbt_mode=dbt_mode)
-        if rebuilt != baseline:
-            raise AgenticContractError(
+        if not _source_reports_match(
+            baseline,
+            rebuilt,
+            baseline_source=requested_source_path,
+            rebuilt_source=snapshot_source,
+        ):
+            raise AirflowSourceReproducibilityError(
                 "Airflow source no longer reproduces the deterministic report; rerun convert before prepare"
             )
 
@@ -347,11 +381,13 @@ def prepare_airflow_resolutions(
             "contract_version": CONTRACT_VERSION,
             "source": "airflow",
             "provider": {**_provider_identity(), "sha256": provider_sha256},
-            "source_path": str(source_path),
+            "source_path": str(requested_source_path),
             "source_kind": "file" if source_path.is_file() else "directory",
+            "source_entry_path": source_entry_path,
             "source_files": [
                 {"path": relative, "sha256": source_hashes[relative]} for relative in sorted(source_hashes)
             ],
+            "omitted_source_files": omitted_source_files,
             "dbt_mode": dbt_mode,
             "baseline_report_sha256": baseline_hash,
             "gaps_sha256": _sha256_bytes(gaps_bytes),
@@ -468,11 +504,35 @@ def apply_airflow_resolutions(
     baseline = json.loads(baseline_bytes)
 
     _verify_snapshot(workspace, manifest)
-    live_source = (source_path or Path(manifest["source_path"])).resolve()
-    if _current_source_hashes(live_source) != _manifest_source_hashes(manifest):
+    prepared_source = Path(manifest["source_path"])
+    if source_path is None and not prepared_source.exists():
+        raise AgenticContractError(
+            "Airflow source input is missing because the prepared source path no longer exists; "
+            "provide --source-path with the same source used for prepare"
+        )
+    live_source = (source_path or prepared_source).resolve()
+    if not live_source.exists():
+        raise AgenticContractError(f"Airflow source path does not exist: {live_source}")
+    manifest_source_hashes = _manifest_source_hashes(manifest)
+    current_source_files, current_omitted_source_files = _source_snapshot(
+        live_source,
+        excluded_roots=(output_dir,),
+    )
+    current_source_hashes = {relative: _sha256_file(path) for relative, path in current_source_files}
+    if (
+        current_source_hashes != manifest_source_hashes
+        or current_omitted_source_files != _manifest_omitted_source_files(manifest)
+    ):
         raise AgenticContractError("source changed since prepare; re-run prepare")
     snapshot_source = _snapshot_source(workspace, manifest)
-    if _rebuild_airflow_report(snapshot_source, baseline, dbt_mode=manifest["dbt_mode"]) != baseline:
+    rebuilt = _rebuild_airflow_report(snapshot_source, baseline, dbt_mode=manifest["dbt_mode"])
+    if not _source_reports_match(
+        baseline,
+        rebuilt,
+        baseline_source=prepared_source,
+        rebuilt_source=snapshot_source,
+        source_kind=str(manifest["source_kind"]),
+    ):
         raise AgenticContractError("The prepared source snapshot no longer reproduces the deterministic report")
 
     gap_by_id = {gap["gap_id"]: gap for gap in gaps}
@@ -535,6 +595,8 @@ def apply_airflow_resolutions(
         "status": "review_complete" if review_complete else "applied",
         "accepted_gap_ids": selected_ids,
         "declined_gap_ids": [decision["gap_id"] for decision in decisions if decision["decision"] == "declined"],
+        "reviewed_count": len(reviewed_ids),
+        "unreviewed_count": len(gaps) - len(reviewed_ids),
         "report_path": str(report_path),
     }
 
@@ -544,11 +606,12 @@ def _reset_airflow_resolutions(output_dir: Path) -> dict[str, Any]:
     workspace = _workspace(output_dir)
     evidence = output_dir / "metadata" / "agentic"
     if workspace.is_dir():
-        manifest, _ = _load_workspace(workspace)
+        manifest, gaps = _load_workspace(workspace)
         material_dir = workspace
         _verify_snapshot(workspace, manifest)
     elif evidence.is_dir():
-        _load_persisted_agentic_evidence(evidence)
+        persisted = _load_persisted_agentic_evidence(evidence)
+        gaps = persisted.gaps
         manifest = _read_json_object(evidence / "manifest.json")
         material_dir = evidence
     else:
@@ -581,7 +644,14 @@ def _reset_airflow_resolutions(output_dir: Path) -> dict[str, Any]:
 
     report_path = output_dir / ".work" / "translation_report.agentic.json"
     _write_json_atomic(report_path, baseline)
-    return {"status": "reset", "accepted_gap_ids": [], "declined_gap_ids": [], "report_path": str(report_path)}
+    return {
+        "status": "reset",
+        "accepted_gap_ids": [],
+        "declined_gap_ids": [],
+        "reviewed_count": 0,
+        "unreviewed_count": len(gaps),
+        "report_path": str(report_path),
+    }
 
 
 def _persist_agentic_evidence(
@@ -771,8 +841,9 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
 
     try:
         source_hashes = _manifest_source_hashes(manifest)
+        _manifest_omitted_source_files(manifest)
     except (KeyError, TypeError) as error:
-        raise AgenticContractError("agentic resolution manifest has invalid source_files") from error
+        raise AgenticContractError("agentic resolution manifest has invalid source file records") from error
     if not source_hashes:
         raise AgenticContractError("agentic resolution manifest has no source_files")
     try:
@@ -883,7 +954,9 @@ def _rebuild_airflow_report(source_path: Path, baseline: dict[str, Any], *, dbt_
     loaded = load_pipelines(source_path, dbt_mode=dbt_mode, exclude_dags=excluded)
     by_name = {pipeline.name: pipeline for pipeline in loaded}
     if any(name not in by_name for name in expected_names):
-        raise AgenticContractError("Source snapshot does not contain every DAG in the deterministic report")
+        raise AirflowSourceReproducibilityError(
+            "Source snapshot does not contain every DAG in the deterministic report"
+        )
     rebuilt = [pipeline_to_dict(by_name[name]) for name in expected_names]
     return {"pipelines": rebuilt} if "pipelines" in baseline else rebuilt[0]
 
@@ -918,6 +991,12 @@ def _build_gap_envelopes(
             if path_key in findings:
                 raise AgenticContractError(f"Duplicate operator placeholder finding at task path: {task_path}")
             findings[path_key] = finding
+        structural_task_keys = {
+            str((finding.get("details") or {}).get("task_key"))
+            for finding in pipeline_findings
+            if airflow_finding_required_capability({str(finding.get("code", ""))}) is not None
+            and (finding.get("details") or {}).get("task_key")
+        }
         tasks = list(_walk_tasks(pipeline.get("tasks") or []))
         downstream = _downstream_index([task for _, task in tasks])
         for task_path, task in tasks:
@@ -925,6 +1004,8 @@ def _build_gap_envelopes(
                 continue
             matched_finding = findings.get(task_path)
             if not matched_finding or not matched_finding.get("fingerprint"):
+                if str(task.get("task_key", "")) in structural_task_keys:
+                    continue
                 raise AgenticContractError(f"Placeholder at task path {list(task_path)} has no bound finding")
             raw_definition = dict(task.get("raw_definition") or {})
             operator = str(raw_definition.get("operator") or task.get("original_type") or "UnknownOperator")
@@ -1557,29 +1638,128 @@ def _pipeline_list(payload: Any) -> list[dict[str, Any]]:
     return pipelines
 
 
-def _source_files(source_path: Path) -> list[tuple[str, Path]]:
-    paths = discover_dags(source_path)
-    root = source_path.parent if source_path.is_file() else source_path
-    return sorted((path.resolve().relative_to(root.resolve()).as_posix(), path.resolve()) for path in paths)
+def _source_snapshot(
+    source_path: Path,
+    *,
+    excluded_roots: tuple[Path, ...] = (),
+) -> tuple[list[tuple[str, Path]], list[dict[str, Any]]]:
+    """Returns bounded source files plus hashed oversized files omitted from the copied snapshot."""
+    files: list[tuple[str, Path]] = []
+    omitted_files: list[dict[str, Any]] = []
+    total_bytes = 0
+    root = source_path.parent.resolve() if source_path.is_file() else source_path.resolve()
+    source_file = source_path.resolve() if source_path.is_file() else None
+    excluded = {
+        path.resolve() for path in excluded_roots if path.resolve() != root and path.resolve().is_relative_to(root)
+    }
+    for directory, directory_names, file_names in root.walk():
+        retained_directories: list[str] = []
+        for name in sorted(directory_names):
+            candidate = directory / name
+            if name in _IGNORED_SOURCE_DIRECTORIES:
+                continue
+            if candidate.is_symlink():
+                continue
+            if (candidate / "pyvenv.cfg").is_file() or (candidate / "conda-meta").is_dir():
+                continue
+            if candidate.resolve() in excluded:
+                continue
+            retained_directories.append(name)
+        directory_names[:] = retained_directories
+        for name in sorted(file_names):
+            candidate = directory / name
+            if candidate.is_symlink():
+                continue
+            if not candidate.is_file():
+                continue
+            size_bytes = candidate.stat().st_size
+            relative = candidate.relative_to(root).as_posix()
+            if (
+                size_bytes > _MAX_SOURCE_SNAPSHOT_FILE_BYTES
+                and candidate.resolve() != source_file
+                and candidate.suffix != ".py"
+            ):
+                omitted_files.append(
+                    {
+                        "path": relative,
+                        "size_bytes": size_bytes,
+                        "sha256": _sha256_file(candidate),
+                    }
+                )
+                continue
+            total_bytes += size_bytes
+            files.append((relative, candidate))
+            if len(files) > _MAX_SOURCE_SNAPSHOT_FILES:
+                raise AirflowSourceReproducibilityError(
+                    f"Airflow source snapshot exceeds {_MAX_SOURCE_SNAPSHOT_FILES} files"
+                )
+            if total_bytes > _MAX_SOURCE_SNAPSHOT_BYTES:
+                raise AirflowSourceReproducibilityError(
+                    f"Airflow source snapshot exceeds {_MAX_SOURCE_SNAPSHOT_BYTES} bytes"
+                )
+    return files, omitted_files
 
 
-def _current_source_hashes(source_path: Path) -> dict[str, str]:
-    if not source_path.exists():
-        return {}
-    return {relative: _sha256_file(path) for relative, path in _source_files(source_path)}
+def _source_reports_match(
+    baseline: dict[str, Any],
+    rebuilt: dict[str, Any],
+    *,
+    baseline_source: Path,
+    rebuilt_source: Path,
+    source_kind: str | None = None,
+) -> bool:
+    is_file = source_kind == "file" if source_kind is not None else baseline_source.is_file()
+    baseline_root = baseline_source.parent if is_file else baseline_source
+    rebuilt_root = rebuilt_source.parent if is_file else rebuilt_source
+    return _canonicalize_source_paths(baseline, baseline_root) == _canonicalize_source_paths(rebuilt, rebuilt_root)
+
+
+def _canonicalize_source_paths(value: Any, source_root: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonicalize_source_paths(item, source_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonicalize_source_paths(item, source_root) for item in value]
+    if not isinstance(value, str):
+        return value
+    roots = sorted({str(source_root.absolute()), str(source_root.resolve())}, key=len, reverse=True)
+    normalized = value
+    for root in roots:
+        boundary = re.compile(re.escape(root) + r"""(?=$|[/\\\s'"]|[.,;:)\]}](?=\s|$|['"]))""")
+        normalized = boundary.sub("<AIRFLOW_SOURCE_ROOT>", normalized)
+    return normalized
 
 
 def _manifest_source_hashes(manifest: dict[str, Any]) -> dict[str, str]:
     return {str(item["path"]): str(item["sha256"]) for item in manifest.get("source_files") or []}
 
 
+def _manifest_omitted_source_files(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    omitted = manifest.get("omitted_source_files") or []
+    if not isinstance(omitted, list):
+        raise AgenticContractError("agentic resolution manifest has invalid omitted_source_files")
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in omitted:
+        if not isinstance(item, dict) or set(item) != {"path", "size_bytes", "sha256"}:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source file")
+        path = item.get("path")
+        size_bytes = item.get("size_bytes")
+        digest = item.get("sha256")
+        if not isinstance(path, str) or not path or path in seen:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source path")
+        if not isinstance(size_bytes, int) or size_bytes < 0:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source size")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source digest")
+        seen.add(path)
+        records.append({"path": path, "size_bytes": size_bytes, "sha256": digest})
+    return records
+
+
 def _snapshot_source(workspace: Path, manifest: dict[str, Any]) -> Path:
     snapshot = workspace / "source"
     if manifest.get("source_kind") == "file":
-        files = manifest.get("source_files") or []
-        if len(files) != 1:
-            raise AgenticContractError("Prepared single-file source manifest is invalid")
-        return snapshot / files[0]["path"]
+        return snapshot / str(manifest.get("source_entry_path") or Path(str(manifest["source_path"])).name)
     return snapshot
 
 

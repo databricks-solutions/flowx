@@ -20,11 +20,18 @@ from flowx.mcp import runner, server  # noqa: E402
 
 
 class _FakeResult:
-    def __init__(self, *, ok: bool = True, stdout: str = "", stderr: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        stdout: str = "",
+        stderr: str = "",
+        returncode: int | None = None,
+    ) -> None:
         self.ok = ok
         self.stdout = stdout
         self.stderr = stderr
-        self.returncode = 0 if ok else 1
+        self.returncode = (0 if ok else 1) if returncode is None else returncode
 
     def as_dict(self) -> dict[str, object]:
         return {"returncode": self.returncode, "stdout": self.stdout, "stderr": self.stderr}
@@ -240,6 +247,58 @@ def test_airflow_gap_state_fails_closed_when_leaf_eligibility_is_missing() -> No
     assert state["structural_gaps"][0]["required_capability"] == "non_leaf_patch"
 
 
+def test_resolve_prepare_gap_id_classifies_against_the_complete_prepared_set(monkeypatch, tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    agentic_dir = output / ".work" / "agentic"
+    agentic_dir.mkdir(parents=True)
+    report = _airflow_report(operator="KubernetesPodOperator")
+    second_finding = {
+        **report["pipelines"][0]["not_translatable"][0],
+        "fingerprint": "gap-2",
+        "details": {
+            **report["pipelines"][0]["not_translatable"][0]["details"],
+            "task_path": ["tasks", 1],
+        },
+    }
+    report["pipelines"][0]["not_translatable"].append(second_finding)
+    report["pipelines"][0]["tasks"].append(
+        {
+            "type": "PlaceholderActivity",
+            "task_key": "second",
+            "original_type": "KubernetesPodOperator",
+        }
+    )
+    report_path = output / ".work" / "translation_report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    gaps = [
+        _gap("KubernetesPodOperator"),
+        {
+            **_gap("KubernetesPodOperator"),
+            "gap_id": "gap-2",
+            "finding_fingerprints": ["gap-2"],
+        },
+    ]
+    (agentic_dir / "gaps.json").write_text(json.dumps(gaps), encoding="utf-8")
+    source = tmp_path / "dags"
+    source.mkdir()
+    monkeypatch.setattr(runner, "run_adapter", lambda _args: _FakeResult(stdout="{}"))
+
+    result = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "output_dir": str(output),
+            "airflow_source_path": str(source),
+            "report_path": str(report_path),
+            "gap_id": "gap-1",
+        }
+    )
+
+    assert [gap["gap_id"] for gap in result["gaps"]] == ["gap-1"]
+    assert [gap["gap_id"] for gap in result["eligible_gaps"]] == ["gap-1", "gap-2"]
+    assert result["unsupported_gaps"] == []
+
+
 def _stub_airflow_migrate(monkeypatch, output: Path, *, operator: str | None) -> list[list[str]]:
     calls: list[list[str]] = []
 
@@ -285,6 +344,69 @@ def test_airflow_migrate_pauses_for_leaf_agentic_gaps_even_when_noninteractive(m
     assert result["unsupported_gaps"] == []
     assert "airflow_volume_path" in result["next_action"]
     assert [argv[0] for argv in calls] == ["discover", "convert", "resolve-agentic"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_ok", "expected_status"),
+    [
+        (agentic_contract.AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE, True, "needs_agentic_resolution"),
+        (1, False, "failed"),
+    ],
+)
+def test_airflow_migrate_only_degrades_source_reproducibility_failures(
+    monkeypatch,
+    tmp_path: Path,
+    returncode: int,
+    expected_ok: bool,
+    expected_status: str,
+) -> None:
+    output = tmp_path / "out"
+    calls: list[list[str]] = []
+
+    def fake_run_adapter(args):
+        argv = [str(value) for value in args]
+        calls.append(argv)
+        if argv[0] == "convert":
+            report_path = output / ".work" / "translation_report.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps(_airflow_report(operator="KubernetesPodOperator")),
+                encoding="utf-8",
+            )
+        if argv[:2] == ["resolve-agentic", "prepare"]:
+            return _FakeResult(
+                ok=False,
+                stderr="Agentic resolution unavailable: Airflow source snapshot exceeds 10000 files",
+                returncode=returncode,
+            )
+        return _FakeResult()
+
+    monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
+    monkeypatch.setattr(runner, "summarize_inventory", lambda _out: {"pipeline_count": 1})
+    monkeypatch.setattr(runner, "summarize_translation", lambda _out: {"pipelines": 1})
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(tmp_path / "dags"),
+            "output_dir": str(output),
+            "interactive": False,
+        }
+    )
+
+    assert result["ok"] is expected_ok
+    assert result["status"] == expected_status
+    assert not any(argv[0] == "package" for argv in calls)
+    if expected_ok:
+        assert result["prepare_unavailable"] == (
+            "Agentic resolution unavailable: Airflow source snapshot exceeds 10000 files"
+        )
+        assert "snapshot exceeds 10000 files" in result["next_action"]
+        assert "source changed" not in result["next_action"]
+        assert result["eligible_gaps"] == []
+        assert result["unsupported_gaps"][0]["code"] == "operator_placeholder"
+    else:
+        assert result["failed_phase"] == "prepare_agentic"
 
 
 def test_airflow_migrate_skips_adf_configuration_prompt_before_agentic_review(monkeypatch, tmp_path: Path):
@@ -561,6 +683,7 @@ def test_hosted_inline_airflow_prepare_and_apply_rematerialize_the_same_source(t
             "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
             "with DAG(dag_id='hosted_apply') as dag:\n"
             "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+            "    second = KubernetesPodOperator(task_id='second', image='python:3.12')\n"
         )
     }
     output = tmp_path / "out"
@@ -637,7 +760,51 @@ def test_hosted_inline_airflow_prepare_and_apply_rematerialize_the_same_source(t
         }
     )
     assert apply_result["ok"] is True
+    assert apply_result["reviewed_count"] == 1
+    assert apply_result["unreviewed_count"] == 1
     assert (output / ".work" / "translation_report.agentic.json").is_file()
+
+
+def test_hosted_airflow_apply_without_source_reports_missing_input(tmp_path: Path) -> None:
+    definitions = {
+        "dag.py": (
+            "from airflow import DAG\n"
+            "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+            "with DAG(dag_id='hosted_apply') as dag:\n"
+            "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+        )
+    }
+    output = tmp_path / "out"
+    assert server._cmd_convert(
+        {
+            "source": "airflow",
+            "airflow_definitions": definitions,
+            "output_dir": str(output),
+        }
+    )["ok"]
+    prepare = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "prepare",
+            "airflow_definitions": definitions,
+            "report_path": str(output / ".work" / "translation_report.json"),
+            "output_dir": str(output),
+        }
+    )
+    assert prepare["ok"] is True
+
+    apply = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "apply",
+            "accept_gap": prepare["gaps"][0]["gap_id"],
+            "output_dir": str(output),
+        }
+    )
+
+    assert apply["ok"] is False
+    assert "source input is missing" in apply["process"]["stderr"]
+    assert "provide --source-path" in apply["process"]["stderr"]
 
 
 def test_airflow_migrate_end_to_end_prepares_gap_without_writing_bundle(tmp_path: Path):
@@ -665,3 +832,93 @@ def test_airflow_migrate_end_to_end_prepares_gap_without_writing_bundle(tmp_path
     assert [gap["operator"] for gap in result["eligible_gaps"]] == ["KubernetesPodOperator"]
     assert (output / ".work" / "agentic" / "gaps.json").is_file()
     assert not (output / "databricks.yml").exists()
+
+
+def test_airflow_migrate_prepares_project_local_custom_operator_gap(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    helper = source / "libs" / "operators.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("class CopyOperator:\n    pass\n", encoding="utf-8")
+    (source / "dag.py").write_text(
+        "from airflow import DAG\n"
+        "from libs.operators import CopyOperator\n"
+        "with DAG(dag_id='custom') as dag:\n"
+        "    copy = CopyOperator(task_id='copy')\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(source),
+            "output_dir": str(output),
+            "interactive": False,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "needs_agentic_resolution"
+    assert [gap["operator"] for gap in result["eligible_gaps"]] == ["CopyOperator"]
+    assert result["unsupported_gaps"] == []
+
+
+def test_airflow_migrate_keeps_ssh_gap_eligible_beside_missing_dbt_project(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    source.mkdir()
+    (source / "dag.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from airflow.providers.ssh.operators.ssh import SSHOperator\n"
+        "with DAG(dag_id='dbt_and_ssh') as dag:\n"
+        "    dbt = BashOperator(task_id='dbt', bash_command='cd missing_project && dbt run')\n"
+        "    ssh = SSHOperator(task_id='ssh', command='run-remote-tool')\n",
+        encoding="utf-8",
+    )
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(source),
+            "output_dir": str(tmp_path / "out"),
+            "interactive": False,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "needs_agentic_resolution"
+    assert "prepare_unavailable" not in result
+    assert "SSHOperator" in {gap["operator"] for gap in result["eligible_gaps"]}
+
+
+def test_airflow_migrate_ignores_gaps_from_excluded_dags(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    source.mkdir()
+    (source / "clean.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='clean') as dag:\n"
+        "    run = BashOperator(task_id='run', bash_command='echo ok')\n",
+        encoding="utf-8",
+    )
+    (source / "excluded.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+        "with DAG(dag_id='excluded') as dag:\n"
+        "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n",
+        encoding="utf-8",
+    )
+
+    result = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(source),
+            "output_dir": str(tmp_path / "out"),
+            "exclude_dag": ["excluded"],
+            "interactive": False,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert "prepare_agentic" not in result["steps"]

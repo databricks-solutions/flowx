@@ -18,7 +18,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from flowx.agentic import airflow_gap_findings, classify_airflow_gaps
+from flowx.agentic import (
+    AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE,
+    airflow_gap_findings,
+    classify_airflow_gaps,
+)
 from flowx.mcp import runner
 
 
@@ -340,14 +344,23 @@ def _cmd_resolve_agentic(p: dict[str, Any]) -> dict[str, Any]:
             result = runner.run_adapter(args)
         payload = runner.parse_stdout_json(result)
         extra: dict[str, Any] = {"result": payload}
-        if action == "prepare":
-            gaps = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
-            if p.get("gap_id") and isinstance(gaps, list):
-                gaps = [gap for gap in gaps if isinstance(gap, dict) and gap.get("gap_id") == p["gap_id"]]
+        if action == "apply" and result.ok and isinstance(payload, dict):
+            extra["reviewed_count"] = int(payload.get("reviewed_count", 0))
+            extra["unreviewed_count"] = int(payload.get("unreviewed_count", 0))
+        if action == "prepare" and result.ok:
+            prepared_gaps = runner.read_json(output_dir / ".work" / "agentic" / "gaps.json")
+            gaps = prepared_gaps
+            if p.get("gap_id") and isinstance(prepared_gaps, list):
+                gaps = [gap for gap in prepared_gaps if isinstance(gap, dict) and gap.get("gap_id") == p["gap_id"]]
             extra["gaps"] = gaps
             report = runner.read_json(Path(p["report_path"])) if p.get("report_path") else None
-            if isinstance(gaps, list):
-                extra.update(classify_airflow_gaps(report, [gap for gap in gaps if isinstance(gap, dict)]))
+            if isinstance(prepared_gaps, list):
+                extra.update(
+                    classify_airflow_gaps(
+                        report,
+                        [gap for gap in prepared_gaps if isinstance(gap, dict)],
+                    )
+                )
         return {"ok": result.ok, "process": result.as_dict(), **extra}
     finally:
         cleanup()
@@ -686,6 +699,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
             if gap_findings:
                 operator_gaps = [finding for finding in gap_findings if finding.get("code") == "operator_placeholder"]
                 prepared_gaps: list[dict[str, Any]] = []
+                prepare_unavailable: str | None = None
                 if operator_gaps:
                     prepare_args: list[Any] = [
                         "resolve-agentic",
@@ -707,17 +721,28 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                         "process": prepare_res.as_dict(),
                     }
                     if not prepare_res.ok:
-                        return {
-                            "ok": False,
-                            "status": "failed",
-                            "failed_phase": "prepare_agentic",
-                            "steps": steps,
-                        }
-                    payload = runner.read_json(out / ".work" / "agentic" / "gaps.json")
-                    if isinstance(payload, list):
-                        prepared_gaps = [gap for gap in payload if isinstance(gap, dict)]
+                        if prepare_res.returncode != AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE:
+                            return {
+                                "ok": False,
+                                "status": "failed",
+                                "failed_phase": "prepare_agentic",
+                                "steps": steps,
+                            }
+                        prepare_unavailable = prepare_res.stderr
+                    else:
+                        payload = runner.read_json(out / ".work" / "agentic" / "gaps.json")
+                        if isinstance(payload, list):
+                            prepared_gaps = [gap for gap in payload if isinstance(gap, dict)]
                 state = classify_airflow_gaps(report, prepared_gaps)
-                if state["eligible_gaps"]:
+                if prepare_unavailable:
+                    unavailable_reason = prepare_unavailable.strip()
+                    next_action = (
+                        f"Automatic leaf-gap preparation is unavailable: {unavailable_reason} Rerun prepare after "
+                        "correcting the reported source snapshot problem. The gaps remain linked failing "
+                        "placeholders; to retain them intentionally, package the deterministic report separately with "
+                        "allow_unresolved_gaps=true."
+                    )
+                elif state["eligible_gaps"]:
                     next_action = (
                         "Stage and review eligible leaf candidates with resolve_agentic, then apply them while "
                         "resupplying the same airflow_volume_path, airflow_workspace_path, airflow_definitions, or "
@@ -741,6 +766,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                     **state,
                     "steps": steps,
                     "next_action": next_action,
+                    **({"prepare_unavailable": prepare_unavailable} if prepare_unavailable else {}),
                 }
 
         package_res = runner.run_adapter(
@@ -954,6 +980,7 @@ def build_server() -> FastMCP:
           to package, where persisted evidence and reconciliation are validated before bundle files are
           written. A successful package that retains reviewed placeholders returns
           ``status="completed_with_reviewed_gaps"`` rather than claiming the migration is semantically complete.
+          Apply responses include ``reviewed_count`` and ``unreviewed_count`` so partial reviews stay explicit.
         - When no gap is eligible for leaf resolution, no agentic report exists to resume. To retain
           those linked failing placeholders intentionally, call ``package`` separately with the
           deterministic ``report_path`` returned by ``migrate`` and ``allow_unresolved_gaps=true``.
