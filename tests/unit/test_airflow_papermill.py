@@ -79,6 +79,19 @@ def test_parameters_become_base_parameters_and_widgets_stay_task_local(tmp_path:
     assert not {"run_date", "limit", "region", "owner"} & declared
 
 
+def test_braces_in_notebook_code_are_not_treated_as_templates(tmp_path: Path) -> None:
+    _write_notebook(tmp_path / "braces.ipynb", [_code("name = 'x'\nprint(f'{{{{name}}}} is {name}')")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='braces') as dag:\n"
+        "    PapermillOperator(task_id='braces', input_nb='braces.ipynb', output_nb='o.ipynb')\n",
+    )
+
+    task = _by_key(pipeline)["braces"]
+    assert isinstance(task, NotebookActivity)
+    assert "{{{{name}}}}" in task.generated_source
+
+
 def test_missing_notebook_becomes_a_placeholder(tmp_path: Path) -> None:
     pipeline = _load_one(
         tmp_path,

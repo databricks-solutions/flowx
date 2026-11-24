@@ -33,6 +33,33 @@ def test_spark_submit_script_from_the_export_is_packaged(tmp_path: Path, task: s
     assert "spark_submit_application_packaged" in codes
 
 
+def test_spark_submit_date_macro_stays_one_argument(tmp_path: Path) -> None:
+    script = tmp_path / "export" / "home" / "jdoe" / "jobs" / "summary.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('summary')\n", encoding="utf-8")
+
+    command = "spark-submit /home/jdoe/jobs/summary.py --run-date {{ ds }}"
+    pipeline = _load(tmp_path, f"BashOperator(task_id='job', bash_command='{command}')")
+    activity = next(task for task in pipeline.tasks if task.task_key == "job")
+
+    assert isinstance(activity, SparkPythonActivity)
+    assert activity.parameters is not None and len(activity.parameters) == 2
+    assert activity.parameters[0] == "--run-date"
+    assert "{{ ds }}" not in activity.parameters[1] and activity.parameters[1].startswith("{{tasks.")
+
+
+def test_braces_in_a_packaged_script_are_not_treated_as_templates(tmp_path: Path) -> None:
+    # Airflow renders the command, never the script, so {{ }} text inside the script is just code or comments.
+    script = tmp_path / "export" / "home" / "jdoe" / "jobs" / "summary.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# The date comes from Airflow's {{ ds }}.\nprint(f'{{literal braces}}')\n", encoding="utf-8")
+
+    pipeline = _load(tmp_path, "BashOperator(task_id='job', bash_command='spark-submit /home/jdoe/jobs/summary.py')")
+
+    assert isinstance(pipeline.tasks[0], SparkPythonActivity)
+    assert "{{ ds }}" in pipeline.tasks[0].generated_source
+
+
 def test_spark_submit_script_missing_from_the_export_keeps_its_path(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, "BashOperator(task_id='job', bash_command='spark-submit /opt/jobs/etl.py')")
     activity = pipeline.tasks[0]

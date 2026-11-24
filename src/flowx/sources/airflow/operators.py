@@ -492,6 +492,27 @@ _SPARK_BOOLEAN_OPTIONS = frozenset({"--supervise", "--verbose", "--load-spark-de
 _SHELL_CONTROL = re.compile(r"(?:&&|\|\||[|;]|(?:^|\s)cd(?:\s|$))")
 
 
+_JINJA_EXPRESSION = re.compile(r"\{\{.*?\}\}")
+
+
+def _split_keeping_templates(command: str) -> list[str]:
+    """Splits a command line like a shell, keeping each ``{{ ... }}`` expression inside one argument.
+
+    Airflow renders the template before the shell splits the line, so ``--run-date {{ ds }}`` passes one
+    argument; a plain ``shlex.split`` would tear it into ``{{``, ``ds``, and ``}}``.
+    """
+    expressions: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        expressions.append(match.group(0))
+        return f"__flowx_template_{len(expressions) - 1}__"
+
+    tokens = shlex.split(_JINJA_EXPRESSION.sub(protect, command))
+    return [
+        re.sub(r"__flowx_template_(\d+)__", lambda match: expressions[int(match.group(1))], token) for token in tokens
+    ]
+
+
 def parse_spark_submit(command: str) -> _SparkSubmit | None:
     """Parses a ``spark-submit ...`` command line into its application + args.
 
@@ -500,7 +521,7 @@ def parse_spark_submit(command: str) -> _SparkSubmit | None:
     if "\n" in command or _SHELL_CONTROL.search(command):
         return None
     try:
-        tokens = shlex.split(command)
+        tokens = _split_keeping_templates(command)
     except ValueError:
         return None
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "spark-submit":

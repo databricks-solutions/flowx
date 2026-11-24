@@ -19,6 +19,7 @@ from flowx.sources.airflow import imported_sources, templating
 from flowx.sources.airflow import operators as ops
 from flowx.sources.airflow.loader import logical_dates, reconcile
 from flowx.sources.airflow.loader.activity_templates import (
+    VERBATIM_PACKAGING_DISCLOSURES,
     _convert_activity_templates,
     _declared_param_default,
     _unresolved_activity_templates,
@@ -526,7 +527,11 @@ def _load_airflow_module(
                     expressions=date_values,
                 )
             )
-        unresolved_templates = _unresolved_activity_templates(activity)
+        packaged_verbatim = any(
+            item.get("task_key") == task_key and item.get("code") in VERBATIM_PACKAGING_DISCLOSURES
+            for item in ctx.disclosures
+        )
+        unresolved_templates = _unresolved_activity_templates(activity, packaged_verbatim=packaged_verbatim)
         if unresolved_templates:
             expressions = ", ".join(sorted(unresolved_templates))
             activity = _replace_with_placeholder(

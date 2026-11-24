@@ -16,6 +16,9 @@ _WIDGET_GET = re.compile(r"""dbutils\.widgets\.get\(\s*['"]([A-Za-z_][A-Za-z0-9_
 
 _JOB_PARAM_REF = re.compile(r"\{\{\s*job\.parameters\.([A-Za-z0-9_]+)\s*\}\}")
 
+# Builder disclosures recording that a task's generated source is a file copied from the export as-is.
+VERBATIM_PACKAGING_DISCLOSURES = frozenset({"papermill_notebook_converted", "spark_submit_application_packaged"})
+
 
 def _convert_activity_templates(activity: Activity) -> set[str]:
     """Converts Airflow Jinja in an activity's parameter fields to DAB refs.
@@ -56,10 +59,16 @@ def _convert_activity_templates(activity: Activity) -> set[str]:
     return referenced
 
 
-def _unresolved_activity_templates(activity: Activity) -> set[str]:
-    """Returns residual Airflow Jinja expressions in task parameter fields."""
+def _unresolved_activity_templates(activity: Activity, *, packaged_verbatim: bool = False) -> set[str]:
+    """Returns residual Airflow Jinja expressions in task parameter fields.
+
+    *packaged_verbatim* marks generated source copied from a file the task runs (a papermill notebook or a
+    spark-submit script). Airflow renders only the operator's arguments, never that file, so ``{{ }}`` text in
+    it is ordinary code or comments, not an unresolved template.
+    """
     unresolved: set[str] = set()
-    for attribute in ("base_parameters", "job_parameters", "parameters", "sql", "generated_source"):
+    attributes = ("base_parameters", "job_parameters", "parameters", "sql")
+    for attribute in attributes if packaged_verbatim else (*attributes, "generated_source"):
         unresolved |= templating.unresolved_jinja_expressions(getattr(activity, attribute, None))
     # Generated source holds Python callable bodies that Airflow never renders, so only rendered fields
     # are checked for statements and comments.
