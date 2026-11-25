@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from flowx.models.ir import Pipeline, PlaceholderActivity
+from flowx.sources.airflow.imported_sources import import_table, imported_sources, search_roots
 from flowx.sources.airflow.loader import load_pipelines
 
 _DAG = (
@@ -167,3 +169,56 @@ def test_module_file_too_large_to_read_is_recorded(tmp_path: Path) -> None:
     )
 
     assert sources["CopyOperator"]["unresolved"] == "the module file is too large to read"
+
+
+def test_operator_used_through_a_dotted_import_carries_its_class(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "dags/dag.py": (
+                "from airflow import DAG\n"
+                "import company.operators.custom\n"
+                "with DAG(dag_id='d') as dag:\n"
+                "    company.operators.custom.LoadOperator(task_id='load')\n"
+            ),
+            "dags/company/__init__.py": "",
+            "dags/company/operators/__init__.py": "",
+            "dags/company/operators/custom.py": (
+                "from airflow.models import BaseOperator\n\nclass LoadOperator(BaseOperator):\n    pass\n"
+            ),
+        },
+    )
+
+    sources = _sources(load_pipelines(tmp_path / "dags")[0], "load")
+
+    record = sources["company.operators.custom.LoadOperator"]
+    assert record["import"] == "import company.operators.custom"
+    assert "class LoadOperator(BaseOperator)" in record["content"]
+
+
+def test_attribute_of_a_call_result_does_not_hide_an_imported_module(tmp_path: Path) -> None:
+    _write(tmp_path, {"dags/dag.py": "import utils\n", "dags/utils.py": "VALUE = 1\n"})
+    imports = import_table(ast.parse("import utils\n"))
+    expression = ast.parse("load(get_config().utils, utils)", mode="eval").body
+
+    records = imported_sources(expression, imports, search_roots(tmp_path / "dags" / "dag.py", tmp_path / "dags"))
+
+    assert [record["name"] for record in records] == ["utils"]
+
+
+def test_dotted_operator_used_twice_attaches_only_its_class(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "dags/dag.py": "import company.ops.custom\n",
+            "dags/company/__init__.py": "VALUE = 1\n",
+            "dags/company/ops/__init__.py": "",
+            "dags/company/ops/custom.py": "class Load:\n    pass\n",
+        },
+    )
+    imports = import_table(ast.parse("import company.ops.custom\n"))
+    expression = ast.parse("company.ops.custom.Load(task_id='a', kind=company.ops.custom.Load)", mode="eval").body
+
+    records = imported_sources(expression, imports, search_roots(tmp_path / "dags" / "dag.py", tmp_path / "dags"))
+
+    assert [record["name"] for record in records] == ["company.ops.custom.Load"]

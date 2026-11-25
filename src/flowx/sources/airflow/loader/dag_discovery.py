@@ -336,7 +336,19 @@ def _import_time_nodes(module: ast.Module) -> list[ast.AST]:
     return nodes
 
 
-def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = ()) -> ast.AST | None:
+def might_contain_dags(source: str) -> bool:
+    """Returns whether Airflow's safe-mode DAG discovery would parse this file.
+
+    With ``DAG_DISCOVERY_SAFE_MODE`` on, its default, Airflow only imports a file whose text contains both
+    ``airflow`` and ``dag`` in any case, so a helper such as a settings module is never run for DAGs.
+    """
+    lowered = source.lower()
+    return "airflow" in lowered and "dag" in lowered
+
+
+def dag_generator(
+    module: ast.Module, declarations: Sequence[DagDeclaration] = (), *, include_globals: bool = True
+) -> ast.AST | None:
     """Returns the first construct through which a module builds DAGs flowx cannot see, or None.
 
     That is a call that registers DAGs through a DAG-generating library (dag-factory's ``generate_dags`` or
@@ -345,7 +357,8 @@ def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = (
     DAGs. Only code that runs at import time counts: module-level statements and the functions they call.
     Reading ``globals()``, importing a library, or only constructing a ``DagFactory`` does not count, and
     neither does a registration that is one of *declarations*, such as a static factory call stored with
-    ``globals()[name]``.
+    ``globals()[name]``. Without *include_globals*, ``globals()`` registrations do not count either, as for a
+    file Airflow would not parse (see :func:`might_contain_dags`).
     """
     aliases = _import_aliases(module)
     declared = {id(node) for declaration in declarations for node in ast.walk(declaration.node)}
@@ -361,7 +374,8 @@ def dag_generator(module: ast.Module, declarations: Sequence[DagDeclaration] = (
 
     def is_globals(node: ast.AST) -> bool:
         return (
-            isinstance(node, ast.Call)
+            include_globals
+            and isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "globals"
             and not node.args

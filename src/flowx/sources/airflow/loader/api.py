@@ -11,6 +11,7 @@ from flowx.models.ir import (
     PlaceholderActivity,
     RunJobActivity,
 )
+from flowx.skipped_dags import UNNAMED_DAG_FINDINGS
 from flowx.sources.airflow import audit as source_audit
 from flowx.sources.airflow.loader.ast_utils import _expand_top_level_loops
 from flowx.sources.airflow.loader.dag_discovery import (
@@ -19,6 +20,7 @@ from flowx.sources.airflow.loader.dag_discovery import (
     _module_for_dag,
     _top_level_dag_declarations,
     dag_generator,
+    might_contain_dags,
 )
 from flowx.sources.airflow.loader.lowering import _load_airflow_module
 from flowx.sources.airflow.loader.reconcile import pause_unfinished_schedule
@@ -50,7 +52,7 @@ def load_airflow_dags(
     source = Path(dag_path).read_text(encoding="utf-8")
     module = _expand_top_level_loops(ast.parse(source))
     declarations = _top_level_dag_declarations(module)
-    generator = dag_generator(module, declarations)
+    generator = dag_generator(module, declarations, include_globals=might_contain_dags(source))
     pipelines: list[Pipeline] = []
     for declaration in declarations:
         if declaration.unsupported_reason is not None:
@@ -138,36 +140,60 @@ def load_pipelines(
 
 
 def _replace_excluded_dag_references(pipelines: list[Pipeline], excluded: set[str]) -> None:
-    """Replaces included-to-excluded run-job references with explicit placeholders."""
+    """Replaces included-to-excluded run-job references with explicit placeholders.
+
+    Only a task that triggers a DAG by name counts, not one that runs an existing Databricks job by id. When an
+    excluded file is a DAG generator, whose DAGs flowx cannot name, a trigger of any DAG that is not in this
+    migration counts too, since it may target one of them.
+    """
     excluded_by_key = {to_lowercase_key(name): name for name in excluded}
+    generator_excluded = any(
+        pipeline.migration_status == "excluded"
+        and any(finding.get("code") in UNNAMED_DAG_FINDINGS for finding in pipeline.not_translatable)
+        for pipeline in pipelines
+    )
+    included_keys = {
+        to_lowercase_key(pipeline.name) for pipeline in pipelines if pipeline.migration_status != "excluded"
+    }
     for pipeline in pipelines:
         if pipeline.migration_status == "excluded":
             continue
         for index, task in enumerate(pipeline.tasks):
-            if isinstance(task, RunJobActivity) and task.job_name in excluded_by_key:
+            if not isinstance(task, RunJobActivity) or task.existing_job_id:
+                continue
+            if task.job_name in excluded_by_key:
                 excluded_name = excluded_by_key[task.job_name]
-                placeholder = PlaceholderActivity(
-                    name=task.name,
-                    task_key=task.task_key,
-                    depends_on=task.depends_on,
-                    original_type="ExcludedDagReference",
-                    comment=f"Referenced Airflow DAG {excluded_name!r} was excluded from this migration.",
-                    raw_definition={"excluded_dag": excluded_name},
+                comment = f"Referenced Airflow DAG {excluded_name!r} was excluded from this migration."
+            elif generator_excluded and task.job_name not in included_keys:
+                excluded_name = task.job_name
+                comment = (
+                    f"Referenced Airflow DAG {excluded_name!r} is not in this migration and may be built by an "
+                    "excluded DAG generator file."
                 )
-                pipeline.tasks[index] = placeholder
-                entry = source_audit.finding(
-                    source_file=str(pipeline.audit.get("source_file", "")),
-                    code="excluded_dag_reference",
-                    severity="gap",
-                    message=f"Task {task.task_key!r} references excluded DAG {excluded_name!r}.",
-                    details={"task_key": task.task_key, "excluded_dag": excluded_name},
-                )
-                pipeline.not_translatable.append(entry)
-                if pipeline.reconciliation_status != "failed":
-                    pipeline.reconciliation_status = "verified_with_gaps"
-                pause_unfinished_schedule(pipeline)
-                pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
-                pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
+            else:
+                continue
+            placeholder = PlaceholderActivity(
+                name=task.name,
+                task_key=task.task_key,
+                depends_on=task.depends_on,
+                original_type="ExcludedDagReference",
+                comment=comment,
+                raw_definition={"excluded_dag": excluded_name},
+            )
+            pipeline.tasks[index] = placeholder
+            entry = source_audit.finding(
+                source_file=str(pipeline.audit.get("source_file", "")),
+                code="excluded_dag_reference",
+                severity="gap",
+                message=f"Task {task.task_key!r} references excluded DAG {excluded_name!r}.",
+                details={"task_key": task.task_key, "excluded_dag": excluded_name},
+            )
+            pipeline.not_translatable.append(entry)
+            if pipeline.reconciliation_status != "failed":
+                pipeline.reconciliation_status = "verified_with_gaps"
+            pause_unfinished_schedule(pipeline)
+            pipeline.audit["agentic_count"] = int(pipeline.audit.get("agentic_count", 0)) + 1
+            pipeline.audit["deterministic_count"] = max(0, int(pipeline.audit.get("deterministic_count", 0)) - 1)
 
 
 def discover_dags(source_path: Path) -> list[Path]:
@@ -176,7 +202,8 @@ def discover_dags(source_path: Path) -> list[Path]:
     Accepts either a single ``.py`` file or a directory (scanned recursively).
     Discovery uses the same static declaration model as loading, including
     import aliases and qualified TaskFlow decorators. A file that builds its DAGs through dag-factory,
-    gusty, or ``globals()`` is included so it is reported as a failed source rather than skipped.
+    gusty, or ``globals()`` is included so it is reported as a failed source rather than skipped; a ``globals()``
+    write counts only in a file Airflow's safe-mode discovery would parse.
     """
     source_path = Path(source_path)
     candidates = [source_path] if source_path.is_file() else sorted(source_path.rglob("*.py"))
@@ -185,10 +212,14 @@ def discover_dags(source_path: Path) -> list[Path]:
         if candidate.suffix != ".py":
             continue
         try:
-            module = _expand_top_level_loops(ast.parse(candidate.read_text(encoding="utf-8")))
+            source = candidate.read_text(encoding="utf-8")
+            module = _expand_top_level_loops(ast.parse(source))
         except (OSError, SyntaxError):
             continue
-        if _top_level_dag_declarations(module) or dag_generator(module) is not None:
+        if (
+            _top_level_dag_declarations(module)
+            or dag_generator(module, include_globals=might_contain_dags(source)) is not None
+        ):
             dags.append(candidate)
     return dags
 

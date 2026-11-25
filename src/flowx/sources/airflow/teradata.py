@@ -33,6 +33,8 @@ _HEREDOC = re.compile(
 )
 _JINJA_EXPRESSION = re.compile(r"\{\{.*?\}\}", re.DOTALL)
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=", re.DOTALL)
+# What ends one branch of a ``case``.
+_CASE_TERMINATORS = frozenset({";;", ";&", ";;&"})
 
 # Shell keywords that can stand before a command, as in ``do bteq < x`` or ``if ...; then bteq < x``.
 _KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!", "{", "time"})
@@ -115,7 +117,28 @@ def _strip_heredocs(command: str) -> str:
 
 
 # Shell operators, longest first. shlex joins adjacent punctuation, so ``);`` arrives as one token.
-_OPERATORS = (">>", "<<", "&&", "||", ";;", "&>", ">&", "<&", "<>", ">|", "|&", ";", "&", "|", "(", ")", "<", ">")
+_OPERATORS = (
+    ";;&",
+    ">>",
+    "<<",
+    "&&",
+    "||",
+    ";;",
+    ";&",
+    "&>",
+    ">&",
+    "<&",
+    "<>",
+    ">|",
+    "|&",
+    ";",
+    "&",
+    "|",
+    "(",
+    ")",
+    "<",
+    ">",
+)
 _OPERATOR_CHARACTERS = frozenset("();<>|&")
 
 
@@ -131,13 +154,54 @@ def _split_operators(word: str) -> list[str]:
     return operators
 
 
+# Two words side by side, as in ``cd x`` or ``cd /tmp``, which an arithmetic expression never has. A ``/``
+# followed by a space is division, as in ``total / count``, not the start of a path.
+_ADJACENT_WORDS = re.compile(r"[A-Za-z_][\w./-]*\s+(?:[A-Za-z_]|[./][\w./-])")
+_COMMAND_SUBSTITUTION = re.compile(r"\$\([^()]*\)|`[^`]*`")
+
+
+def _mask_arithmetic(command: str) -> str:
+    """Replaces each ``$(( ... ))`` expansion with ``0`` and each ``(( ... ))`` command with ``:``.
+
+    Arithmetic holds expressions, not commands, so ``i++`` or ``START + 10`` must not be read as programs. A
+    command substitution inside it, as in ``$(( $(wc -l < f) + 1 ))``, is kept, and text in ``((`` that
+    reads as commands, such as the nested subshell ``((cd x && make) )``, is left as it is.
+    """
+    output: list[str] = []
+    index = 0
+    while index < len(command):
+        expansion = command.startswith("$((", index)
+        if not expansion and not command.startswith("((", index):
+            output.append(command[index])
+            index += 1
+            continue
+        start = index + (3 if expansion else 2)
+        depth = 2
+        end = start
+        while end < len(command) and depth:
+            depth += {"(": 1, ")": -1}.get(command[end], 0)
+            end += 1
+        if depth:
+            output.append(command[index:])
+            break
+        inner = command[start : end - 2]
+        if _ADJACENT_WORDS.search(_COMMAND_SUBSTITUTION.sub(" 0 ", inner)):
+            output.append(command[index])
+            index += 1
+            continue
+        substitutions = " ".join(_COMMAND_SUBSTITUTION.findall(inner))
+        output.append(f"0 {substitutions}" if expansion else f" : {substitutions} ")
+        index = end
+    return "".join(output)
+
+
 def _shell_words(command: str) -> list[str] | None:
     """Splits a command into shell words and separators, with here-document bodies and comments removed.
 
-    Jinja expressions stay whole, each line break becomes a separator, and ``#`` starts a comment only at
-    the start of a word, as in bash. Returns None when the command does not parse.
+    Jinja expressions stay whole, each line break becomes a separator, ``#`` starts a comment only at
+    the start of a word, as in bash, and arithmetic is masked. Returns None when the command does not parse.
     """
-    masked, expressions = _mask_jinja(_strip_heredocs(command))
+    masked, expressions = _mask_jinja(_mask_arithmetic(_strip_heredocs(command)))
     lexer = shlex.shlex(masked.replace("\n", f" {_LINE_BREAK} "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -178,6 +242,9 @@ def _command_start(words: list[str]) -> int:
         name = _command_name(word)
         if word in _KEYWORDS or _ASSIGNMENT.match(word):
             index += 1
+        elif word == "function" and index + 1 < len(words):
+            # ``function name { ...; }`` defines a function; its body is the commands after ``{``.
+            index += 2
         elif name in _PREFIX_COMMANDS:
             index += 1
             while index < len(words) and (words[index].startswith("-") or _ASSIGNMENT.match(words[index])):
@@ -208,8 +275,28 @@ def _segments(command: str) -> list[_Segment] | None:
             )
         current.clear()
 
+    # One state per open ``case``: "subject" before ``in``, "pattern" before a pattern's ``)``, then "body".
+    cases: list[str] = []
     for word in words:
-        if word in _SEPARATORS:
+        state = cases[-1] if cases else None
+        if state == "subject":
+            if word == "in":
+                cases[-1] = "pattern"
+        elif state == "pattern":
+            if word == "esac":
+                cases.pop()
+            elif word == ")":
+                cases[-1] = "body"
+        elif state == "body" and word in _CASE_TERMINATORS:
+            close(word)
+            cases[-1] = "pattern"
+        elif state == "body" and word == "esac" and _command_start(current) == len(current):
+            close(word)
+            cases.pop()
+        elif word == "case" and _command_start(current) == len(current):
+            close(word)
+            cases.append("subject")
+        elif word in _SEPARATORS:
             close(word)
         else:
             current.append(word)

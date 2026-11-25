@@ -42,6 +42,7 @@ SHELL_PROVIDED = frozenset(
         "REPLY",
         "PIPESTATUS",
         "FUNCNAME",
+        "DATABRICKS_RUNTIME_VERSION",
     }
 )
 
@@ -60,7 +61,10 @@ _READ = re.compile(rf"\bread\s+(?:-[A-Za-z]+\s+(?:\S+\s+)?)*(?P<names>{_NAME}(?:
 
 
 def _unquoted_text(command: str) -> str:
-    """Blanks out single-quoted text and backslash-escaped dollars, which the shell does not expand."""
+    """Blanks out single-quoted text, comments, and backslash-escaped dollars, which the shell does not expand.
+
+    A ``#`` starts a comment only at the start of a word outside double quotes, as in bash.
+    """
     output: list[str] = []
     index = 0
     in_double = False
@@ -69,6 +73,12 @@ def _unquoted_text(command: str) -> str:
         if character == "\\" and index + 1 < len(command):
             output.append("  ")
             index += 2
+            continue
+        if character == "#" and not in_double and (index == 0 or command[index - 1] in " \t\n;&|()"):
+            end = command.find("\n", index)
+            end = len(command) if end == -1 else end
+            output.append(" " * (end - index))
+            index = end
             continue
         if character == '"':
             in_double = not in_double

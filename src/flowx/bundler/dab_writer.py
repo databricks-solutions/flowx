@@ -66,6 +66,12 @@ from flowx.preparer.workspace_downloader import (
     prompt_for_auth_if_missing,
     set_profile,
 )
+from flowx.skipped_dags import (
+    failed_airflow_pipelines,
+    skipped_dag_reference_count,
+    unpackaged_trigger_targets,
+    without_skipped_dag_references,
+)
 from flowx.utils import to_lowercase_key
 
 
@@ -518,6 +524,7 @@ def write_bundle_group(
     schema: str = "default",
     bundle_name: str | None = None,
     skipped_pipelines: list[str] | None = None,
+    left_out_dags: list[str] | None = None,
 ) -> list[Path]:
     """Writes one DAB bundle holding every workflow in *workflows*.
 
@@ -834,10 +841,11 @@ def write_bundle_group(
         pydabs_dbt_factories=pydabs_dbt_factory_configs,
         airflow_backfills=airflow_backfill_configs,
         skipped_pipelines=list(skipped_pipelines or []),
+        left_out_dags=list(left_out_dags or []),
         required_variables={
             name: declaration["description"]
             for name, declaration in databricks_yml_dict.get("variables", {}).items()
-            if name in _CLUSTER_VARIABLES and "default" not in declaration
+            if name in _REQUIRED_VARIABLE_NAMES and "default" not in declaration
         },
         synthetic_default_parameters=list(_synthetic_default_parameters),
     )
@@ -1150,6 +1158,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--skip-failed-dags",
+        action="store_true",
+        help=(
+            "Airflow only: package every DAG that passed reconciliation and leave out the ones that failed, "
+            "instead of writing no bundle at all. A task that triggers a left-out DAG becomes a placeholder, "
+            "and its job's schedule is paused."
+        ),
+    )
+    parser.add_argument(
         "--group-spec",
         type=Path,
         default=None,
@@ -1172,10 +1189,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     review_counts: dict[str, int] = {}
+    skipped_dags = failed_airflow_pipelines(_read_report(args.report)) if args.skip_failed_dags else []
     report_failures = _report_reconciliation_failures(
         args.report,
         allow_unresolved_gaps=args.allow_unresolved_gaps,
         review_counts=review_counts,
+        skipped_dags=frozenset(skipped_dags),
     )
     if review_counts:
         print("Airflow gap review: " + json.dumps(review_counts))
@@ -1200,7 +1219,14 @@ def main(argv: list[str] | None = None) -> int:
             enable_workspace_downloads(True)
 
     print(f"Loading translation report: {args.report}")
-    workflows, skipped_pipelines = _load_report(args.report)
+    workflows, skipped_pipelines = _load_report(args.report, skipped_dags=frozenset(skipped_dags))
+    if skipped_dags:
+        print(
+            f"Warning: left out {len(skipped_dags)} Airflow DAG(s) that failed reconciliation "
+            f"(--skip-failed-dags): {', '.join(skipped_dags)}. Fix them and re-run discover, convert, and package "
+            "to include them.",
+            file=sys.stderr,
+        )
     if skipped_pipelines:
         print(
             f"Warning: skipped {len(skipped_pipelines)} malformed pipeline "
@@ -1211,6 +1237,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not workflows:
         # Distinguish "every entry was malformed" (something to fix) from a genuinely empty report.
+        if skipped_dags:
+            print(
+                "No pipelines to package: every Airflow DAG failed reconciliation and --skip-failed-dags left "
+                "them all out.",
+                file=sys.stderr,
+            )
+            return 1
         if skipped_pipelines:
             print(
                 "No valid pipelines to package: every entry in the report was malformed.",
@@ -1261,6 +1294,7 @@ def main(argv: list[str] | None = None) -> int:
                 schema=args.schema,
                 bundle_name=combined_name,
                 skipped_pipelines=skipped_pipelines,
+                left_out_dags=skipped_dags,
             )
         )
         bundle_dirs = [args.output_dir]
@@ -1312,6 +1346,7 @@ def main(argv: list[str] | None = None) -> int:
                     schema=args.schema,
                     bundle_name=group_name,
                     skipped_pipelines=skipped_pipelines,
+                    left_out_dags=skipped_dags,
                 )
                 created_all.extend(created)
                 dirs.append(b_dir)
@@ -1386,7 +1421,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     required = sorted(
-        {name for bundle_dir in bundle_dirs for name in _required_cluster_variables_in(bundle_dir / "databricks.yml")}
+        {name for bundle_dir in bundle_dirs for name in _required_variables_in(bundle_dir / "databricks.yml")}
     )
     print("\nNext steps:")
     print("  1. Review the generated notebooks in src/")
@@ -1398,18 +1433,20 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  3. Validate the bundle: databricks bundle validate")
         print("  4. Deploy: databricks bundle deploy -t dev")
-    return 1 if invariant_violations else 0
+    if invariant_violations:
+        return 1
+    return 0
 
 
-def _required_cluster_variables_in(databricks_yml: Path) -> set[str]:
-    """Returns the required cluster variables a written ``databricks.yml`` declares."""
+def _required_variables_in(databricks_yml: Path) -> set[str]:
+    """Returns the required cluster and warehouse variables a written ``databricks.yml`` declares."""
     if not databricks_yml.is_file():
         return set()
     config = yaml.safe_load(databricks_yml.read_text(encoding="utf-8")) or {}
     variables = config.get("variables") or {}
     return {
         name
-        for name in _CLUSTER_VARIABLES
+        for name in _REQUIRED_VARIABLE_NAMES
         if isinstance(variables.get(name), dict) and "default" not in variables[name]
     }
 
@@ -2226,6 +2263,8 @@ def _wrap_pipeline_resource(resource: dict[str, Any]) -> dict[str, Any]:
 _VAR_REFERENCE_RE = re.compile(r"\$\{var\.([A-Za-z_][A-Za-z0-9_]*(?:-+[A-Za-z0-9_]+)*)\}")
 
 _CLUSTER_VARIABLES = frozenset({"node_type_id", "spark_version"})
+# Variables flowx declares without a default, which the user supplies for each target.
+_REQUIRED_VARIABLE_NAMES = _CLUSTER_VARIABLES | {"warehouse_id"}
 _BUILTIN_BUNDLE_VARIABLES = frozenset({"catalog", "schema"}) | _CLUSTER_VARIABLES
 
 
@@ -2931,11 +2970,15 @@ def _normalize_base_parameters(
     return resolved
 
 
-def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
+def _load_report(
+    report_path: Path, *, skipped_dags: frozenset[str] = frozenset()
+) -> tuple[list[PreparedWorkflow], list[str]]:
     """Loads a translation report and reconstruct PreparedWorkflow objects.
 
     Args:
         report_path: Path to the translation report JSON file.
+        skipped_dags: Airflow pipelines to leave out, as if excluded. A task in another pipeline
+            that triggers one becomes a placeholder, and that pipeline's schedule is paused.
 
     Returns:
         A ``(workflows, skipped)`` tuple: one PreparedWorkflow per pipeline, plus the
@@ -2950,7 +2993,7 @@ def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
     skipped: list[str] = []
 
     if "tasks" in report and "name" in report:
-        if report.get("migration_status") == "excluded":
+        if report.get("migration_status") == "excluded" or report.get("name") in skipped_dags:
             return workflows, skipped
         workflow = _pipeline_dict_to_workflow(report)
         workflows.append(workflow)
@@ -2997,12 +3040,17 @@ def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
         # pipeline, each already in the single-pipeline {"name", "tasks", ...} IR shape. Route each
         # through the same machinery the single-pipeline branch uses. Mirrors the adapter's
         # _load_pipelines (adapter/__main__.py) so both report consumers agree on this shape.
+        unpackaged_targets = unpackaged_trigger_targets(report, skipped_dags)
         for index, pipeline_dict in enumerate(report["pipelines"]):
             if isinstance(pipeline_dict, dict) and "tasks" in pipeline_dict and "name" in pipeline_dict:
                 # Excluded pipelines (e.g. --exclude-dag) emit no Job by design; drop them without
                 # recording a skip, since they are intentionally absent rather than malformed.
-                if pipeline_dict.get("migration_status") == "excluded":
+                if pipeline_dict.get("migration_status") == "excluded" or pipeline_dict["name"] in skipped_dags:
                     continue
+                if skipped_dags:
+                    pipeline_dict = without_skipped_dag_references(
+                        pipeline_dict, skipped_dags, unpackaged_targets=unpackaged_targets
+                    )
                 workflows.append(_pipeline_dict_to_workflow(pipeline_dict))
             else:
                 # A non-conforming entry (corruption / an internal bug) is skipped so the other
@@ -3028,13 +3076,29 @@ def _load_report(report_path: Path) -> tuple[list[PreparedWorkflow], list[str]]:
     return workflows, skipped
 
 
+def _read_report(report_path: Path) -> Any:
+    """Returns a translation report's parsed JSON, or None when it cannot be read; the preflight reports why."""
+    try:
+        with report_path.open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _report_reconciliation_failures(
-    report_path: Path, *, allow_unresolved_gaps: bool = False, review_counts: dict[str, int] | None = None
+    report_path: Path,
+    *,
+    allow_unresolved_gaps: bool = False,
+    review_counts: dict[str, int] | None = None,
+    skipped_dags: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Returns report-shape, source-contract, and reconciliation failures.
 
     Packaging is a security boundary for source reconciliation. A malformed report or an
     unrecognized status must fail closed rather than falling through as an empty/safe report.
+    A failed Airflow pipeline named in *skipped_dags* is not a failure, since it is left out of
+    the bundle; every other check still applies to it. A task that triggers it becomes a placeholder, which
+    counts as an unresolved gap, as for a DAG excluded with ``--exclude-dag``.
     """
     try:
         with report_path.open(encoding="utf-8") as handle:
@@ -3105,6 +3169,7 @@ def _report_reconciliation_failures(
     failures: list[str] = []
     airflow_statuses = {"verified", "verified_with_gaps", "verified_with_reviewed_resolutions", "failed"}
     required_airflow_audit_fields = {"source_file", "audited_activity_count", "transformations"}
+    unpackaged_targets = unpackaged_trigger_targets(report, skipped_dags) if skipped_dags else None
     for index, pipeline in enumerate(pipelines):
         label = f"pipeline[{index}]"
         if not isinstance(pipeline, dict):
@@ -3145,7 +3210,7 @@ def _report_reconciliation_failures(
         if status not in airflow_statuses:
             failures.append(f"{label}: unknown reconciliation_status {status!r} for Airflow")
             continue
-        if migration_status == "excluded":
+        if migration_status == "excluded" or name in skipped_dags:
             continue
         gap_findings = [
             finding
@@ -3157,9 +3222,21 @@ def _report_reconciliation_failures(
 
             counts.update(accepted_count=0, reviewed_count=0)
             counts["unreviewed_count"] = counts.get("unreviewed_count", 0) + airflow_pipeline_gap_count(pipeline)
+        # Placeholders this run adds for tasks that trigger a left-out DAG are unreviewed gaps too.
+        left_out_references = (
+            skipped_dag_reference_count(pipeline, skipped_dags, unpackaged_targets=unpackaged_targets)
+            if skipped_dags
+            else 0
+        )
+        counts["unreviewed_count"] = counts.get("unreviewed_count", 0) + left_out_references
         if gap_findings and not counts["accepted_count"] and not allow_unresolved_gaps:
             failures.append(
                 f"{label}: unresolved Airflow gaps require an accepted agentic candidate or --allow-unresolved-gaps"
+            )
+        elif left_out_references and not counts["accepted_count"] and not allow_unresolved_gaps:
+            failures.append(
+                f"{label}: tasks that trigger a DAG left out by --skip-failed-dags become placeholders, which "
+                "require an accepted agentic candidate or --allow-unresolved-gaps"
             )
         if status != "failed":
             continue

@@ -143,6 +143,8 @@ class Prereqs:
     # Each entry is a human-readable identifier (the pipeline name, or ``index N`` when unnamed) so a
     # skipped pipeline is surfaced rather than silently missing from the bundle.
     skipped_pipelines: list[str] = field(default_factory=list)
+    # Airflow DAGs that failed reconciliation and that ``package --skip-failed-dags`` left out of the bundle.
+    left_out_dags: list[str] = field(default_factory=list)
     # Bundle variables declared without a default (name -> description); `bundle validate` fails until
     # the user supplies each one.
     required_variables: dict[str, str] = field(default_factory=dict)
@@ -173,6 +175,7 @@ class Prereqs:
             and not self.pydabs_dbt_factories
             and not self.airflow_backfills
             and not self.skipped_pipelines
+            and not self.left_out_dags
             and not self.required_variables
             and not self.synthetic_default_parameters
         )
@@ -392,6 +395,7 @@ def build_prereqs(
     skipped_pipelines: list[str] | None = None,
     required_variables: dict[str, str] | None = None,
     synthetic_default_parameters: list[dict[str, str]] | None = None,
+    left_out_dags: list[str] | None = None,
 ) -> Prereqs:
     """Assemble a :class:`Prereqs` from the bundle's generated artifacts.
 
@@ -443,6 +447,7 @@ def build_prereqs(
         pydabs_dbt_factories=list(pydabs_dbt_factories or []),
         airflow_backfills=list(airflow_backfills or []),
         skipped_pipelines=list(skipped_pipelines or []),
+        left_out_dags=list(left_out_dags or []),
         required_variables=dict(required_variables or {}),
         synthetic_default_parameters=list(synthetic_default_parameters or []),
     )
@@ -958,6 +963,19 @@ def render_setup_md(prereqs: Prereqs, *, bundle_name: str) -> str:
             # Backtick-wrap so pipeline names read cleanly and stay unambiguous in
             # Markdown even when they contain spaces or Markdown-special characters.
             lines.append(f"- `{skipped}`")
+        lines.append("")
+
+    if prereqs.left_out_dags:
+        lines.append("## Left-out DAGs")
+        lines.append("")
+        lines.append(
+            "These Airflow DAGs failed reconciliation, and `package --skip-failed-dags` left them out of this "
+            "bundle. A task that triggers one of them is a placeholder that fails when it runs, and its job's "
+            "schedule is paused. Fix each DAG, then re-run discover, convert, and package to include it."
+        )
+        lines.append("")
+        for dag in prereqs.left_out_dags:
+            lines.append(f"- `{dag}`")
         lines.append("")
 
     return "\n".join(lines)

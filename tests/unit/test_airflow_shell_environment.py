@@ -16,6 +16,10 @@ from flowx.sources.airflow.shell_environment import environment_references
     [
         ("$DBT_PATH run --select dim_aircraft", ["DBT_PATH"]),
         ("cd ${PROJECT_DIR:-/opt} && make", ["PROJECT_DIR"]),
+        ("# needs $FOO\necho hi", []),
+        ("echo hi  # uses $BAR", []),
+        ('echo "a #$BAZ"', ["BAZ"]),
+        ("echo $DATABRICKS_RUNTIME_VERSION", []),
         ('echo "$A $B" $A', ["A", "B"]),
         ("echo ${#ROWS} ${!REF}", ["ROWS", "REF"]),
         ("echo '$NOT_EXPANDED'", []),

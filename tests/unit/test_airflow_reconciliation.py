@@ -486,6 +486,48 @@ def test_excluded_dag_stays_audited_and_included_reference_becomes_placeholder(t
     assert by_name["caller"].reconciliation_status == "verified_with_gaps"
 
 
+def test_excluding_a_generator_file_replaces_triggers_of_dags_it_may_build(tmp_path: Path) -> None:
+    (tmp_path / "caller.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.trigger_dagrun import TriggerDagRunOperator\n"
+        "with DAG(dag_id='caller') as dag:\n"
+        "    trigger = TriggerDagRunOperator(task_id='trigger', trigger_dag_id='built')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "factory.py").write_text(
+        "from airflow import DAG\nfor name in ['built']:\n    globals()[name] = DAG(name, schedule=None)\n",
+        encoding="utf-8",
+    )
+
+    pipelines = airflow_loader.load_pipelines(tmp_path, exclude_dags={"factory"})
+    caller = next(pipeline for pipeline in pipelines if pipeline.name == "caller")
+
+    assert isinstance(caller.tasks[0], PlaceholderActivity)
+    assert caller.tasks[0].raw_definition == {"excluded_dag": "built"}
+
+
+def test_excluded_dag_name_does_not_replace_a_run_now_task(tmp_path: Path) -> None:
+    (tmp_path / "caller.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator\n"
+        "with DAG(dag_id='caller') as dag:\n"
+        "    run = DatabricksRunNowOperator(task_id='target', job_id=123)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "target.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='target') as dag:\n"
+        "    work = BashOperator(task_id='work', bash_command='echo work')\n",
+        encoding="utf-8",
+    )
+
+    pipelines = airflow_loader.load_pipelines(tmp_path, exclude_dags={"target"})
+    caller = next(pipeline for pipeline in pipelines if pipeline.name == "caller")
+
+    assert not isinstance(caller.tasks[0], PlaceholderActivity)
+
+
 @pytest.mark.parametrize(
     ("filename", "dag_import", "decorator"),
     [

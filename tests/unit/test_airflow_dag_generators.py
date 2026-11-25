@@ -17,9 +17,10 @@ from flowx.sources.airflow.loader import discover_dags, load_pipelines
         "dag_factory.generate_dags(globals())\n",
         "from dagfactory import load_yaml_dags\nload_yaml_dags(globals_dict=globals())\n",
         "from gusty import create_dag\ndag = create_dag('/opt/airflow/dags/jobs')\n",
+        "# Registers the Airflow DAG objects.\n"
         "from configs import build_all\nfor name, built in build_all().items():\n    globals()[name] = built\n",
-        "from configs import build_all\nglobals().update(build_all())\n",
-        "from configs import register\nregister(globals())\n",
+        "# Registers the Airflow DAG objects.\nfrom configs import build_all\nglobals().update(build_all())\n",
+        "# Registers the Airflow DAG objects.\nfrom configs import register\nregister(globals())\n",
     ],
 )
 def test_generated_dag_file_is_reported_as_a_failed_source(tmp_path: Path, source: str) -> None:
@@ -75,7 +76,7 @@ def test_import_only_helper_is_not_reported(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "generation",
     [
-        "from configs import build_all\nglobals().update(build_all())\n",
+        "# Registers the Airflow DAG objects.\nfrom configs import build_all\nglobals().update(build_all())\n",
         "import dagfactory\ndagfactory.DagFactory('/opt/airflow/dags/config.yml').generate_dags(globals())\n",
     ],
 )
@@ -141,3 +142,13 @@ def test_method_that_generates_dags_is_not_reported(tmp_path: Path) -> None:
     )
 
     assert discover_dags(tmp_path) == []
+
+
+def test_helper_that_writes_globals_without_airflow_is_not_a_dag_file(tmp_path: Path) -> None:
+    (tmp_path / "settings.py").write_text(
+        "CONFIG = {'bucket': 'b', 'region': 'r'}\nfor k, v in CONFIG.items():\n    globals()[k.upper()] = v\n",
+        encoding="utf-8",
+    )
+
+    assert discover_dags(tmp_path) == []
+    assert load_pipelines(tmp_path) == []
