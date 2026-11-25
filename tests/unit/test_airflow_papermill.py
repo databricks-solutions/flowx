@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from flowx.models.ir import NotebookActivity, PlaceholderActivity
 from flowx.sources.airflow import papermill
 from flowx.sources.airflow.loader import load_airflow_dags
@@ -275,3 +277,84 @@ def _document(cells: list[dict[str, object]]) -> dict[str, object]:
 def _write_notebook(path: Path, cells: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_document(cells)), encoding="utf-8")
+
+
+def test_capture_with_a_variable_name_becomes_a_gap() -> None:
+    document = _document([_code("%%capture out\nprint(1)")])
+
+    with pytest.raises(papermill.NotebookConversionError, match="%%capture to store its output"):
+        papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+
+def test_capture_with_only_flags_is_dropped() -> None:
+    document = _document([_code("%%capture --no-stderr --no-display\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "%%capture" not in converted.source
+    assert "print(1)" in converted.source
+    assert any("dropped the %%capture magic" in note for note in converted.notes)
+
+
+def test_bare_capture_is_dropped() -> None:
+    document = _document([_code("%%capture\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "%%capture" not in converted.source
+
+
+@pytest.mark.parametrize("line", ["%load_ext autoreload", "%load_ext sql", "%autoreload 2", "%matplotlib inline"])
+def test_droppable_line_magics_are_dropped(line: str) -> None:
+    document = _document([_code(f"{line}\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert line.split()[0] not in converted.source
+    assert "print(1)" in converted.source
+
+
+@pytest.mark.parametrize("line", ["%load_ext myext", "%load_ext", "%load_ext autoreload myext"])
+def test_other_load_ext_becomes_a_gap(line: str) -> None:
+    document = _document([_code(f"{line}\nprint(1)")])
+
+    with pytest.raises(papermill.NotebookConversionError, match="has no deterministic|runs '%load_ext'"):
+        papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "%config InlineBackend.figure_format = 'retina'",
+        "%config Completer.use_jedi = False",
+        "%config IPCompleter.greedy = True",
+        "%config SqlMagic.autopandas = True",
+    ],
+)
+def test_display_and_completion_config_is_dropped(line: str) -> None:
+    document = _document([_code(f"{line}\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "%config" not in converted.source
+    assert "print(1)" in converted.source
+
+
+def test_other_config_becomes_a_gap() -> None:
+    document = _document([_code("%config Foo.bar = 1\nprint(1)")])
+
+    with pytest.raises(papermill.NotebookConversionError, match="'%config'"):
+        papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+
+def test_capture_with_a_name_becomes_a_placeholder_end_to_end(tmp_path: Path) -> None:
+    _write_notebook(tmp_path / "captured.ipynb", [_code("%%capture out\nprint(1)")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='captured') as dag:\n"
+        "    PapermillOperator(task_id='captured', input_nb='captured.ipynb', output_nb='o.ipynb')\n",
+    )
+
+    task = _by_key(pipeline)["captured"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "%%capture" in task.comment

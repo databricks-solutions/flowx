@@ -42,8 +42,13 @@ _JOIN_FUNCTIONS = frozenset({"os.path.join", "path.join", "posixpath.join"})
 # Cell magics with a direct Databricks equivalent.
 _CELL_MAGICS = {"%%sql": "%sql", "%%sh": "%sh", "%%bash": "%sh", "%%markdown": "%md", "%%md": "%md"}
 # Magics that only change how an interactive session displays or times work, so a job run can drop them.
-_DROPPABLE_CELL_MAGICS = frozenset({"%%time", "%%timeit", "%%capture", "%%python"})
-_DROPPABLE_LINE_MAGICS = frozenset({"%matplotlib", "%load_ext", "%autoreload", "%config"})
+# %%capture is droppable only without a variable name (see _capture_stores_output).
+_DROPPABLE_CELL_MAGICS = frozenset({"%%time", "%%timeit", "%%python"})
+_DROPPABLE_LINE_MAGICS = frozenset({"%matplotlib", "%autoreload"})
+# %load_ext and %config are droppable only for the extensions and settings listed here; any other one changes
+# behavior, so it stays a gap.
+_DROPPABLE_EXTENSIONS = frozenset({"autoreload", "sql"})
+_DROPPABLE_CONFIG_PREFIXES = ("InlineBackend.", "Completer.", "IPCompleter.", "SqlMagic.")
 _TIMING_LINE_MAGICS = ("%time ", "%timeit ")
 _PIP_PREFIXES = ("!pip ", "%pip ", "!pip3 ", "!python -m pip ", "!python3 -m pip ")
 
@@ -373,7 +378,11 @@ def _code_cells(text: str, index: int) -> tuple[list[str], list[str]]:
         magic = first.split()[0]
         if magic in _CELL_MAGICS:
             return [_magic_cell(_CELL_MAGICS[magic], lines[1:])], notes
-        if magic in _DROPPABLE_CELL_MAGICS:
+        if magic == "%%capture" and _capture_stores_output(first):
+            raise NotebookConversionError(
+                f"cell {index + 1} uses %%capture to store its output in a variable, which has no Databricks form"
+            )
+        if magic in _DROPPABLE_CELL_MAGICS or magic == "%%capture":
             notes.append(f"dropped the {magic} magic from cell {index + 1}")
             lines = lines[1:]
         else:
@@ -392,7 +401,7 @@ def _code_cells(text: str, index: int) -> tuple[list[str], list[str]]:
         elif stripped.startswith(_TIMING_LINE_MAGICS):
             notes.append(f"dropped a timing magic in cell {index + 1}")
             python_lines.append(line.replace(stripped, stripped.split(" ", 1)[1]))
-        elif stripped.startswith("%") and stripped.split()[0] in _DROPPABLE_LINE_MAGICS:
+        elif stripped.startswith("%") and _is_droppable_line_magic(stripped):
             notes.append(f"dropped {stripped.split()[0]} in cell {index + 1}")
         elif stripped.startswith(("%", "!")):
             raise NotebookConversionError(
@@ -408,6 +417,25 @@ def _code_cells(text: str, index: int) -> tuple[list[str], list[str]]:
     if any(line.strip() for line in python_lines):
         cells.append("\n".join(python_lines) + "\n")
     return cells, notes
+
+
+def _capture_stores_output(first_line: str) -> bool:
+    """Returns whether a ``%%capture`` line names a variable. Its flags (``--no-stderr`` and so on) do not."""
+    return any(not token.startswith("-") for token in first_line.split()[1:])
+
+
+def _is_droppable_line_magic(line: str) -> bool:
+    """Returns whether a line magic only changes an interactive session, so a job run can drop it."""
+    parts = line.split()
+    magic = parts[0]
+    if magic in _DROPPABLE_LINE_MAGICS:
+        return True
+    if magic == "%load_ext":
+        return len(parts) == 2 and parts[1] in _DROPPABLE_EXTENSIONS
+    if magic == "%config":
+        # A bare %config only lists the settings, so it changes nothing.
+        return len(parts) == 1 or parts[1].startswith(_DROPPABLE_CONFIG_PREFIXES)
+    return False
 
 
 def _lines_inside_strings(lines: list[str]) -> set[int]:
