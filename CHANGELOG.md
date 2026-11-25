@@ -25,6 +25,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its compute.
 
 ### Fixed
+- Two different spark-submit scripts in one job that share a file name (for example `/home/alice/load.py` and
+  `/home/bob/load.py`) no longer overwrite each other in the bundle. Each distinct script packages to its own file:
+  `scripts/<name>` when the name is used once, otherwise `scripts/<task_key>/<name>`. Tasks that run the same script
+  still share one file.
 - Generated notebooks start each `%md` and `%sh` cell with its magic, so the cell runs as markdown or shell
   instead of Python. This affected papermill notebooks and `BashOperator` `%sh` notebooks without macro widgets.
 - A `{{ ... }}` expression in a spark-submit command stays one argument, so `--run-date {{ ds }}` converts like
