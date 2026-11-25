@@ -237,6 +237,16 @@ def test_airflow_gap_state_trusts_hash_bound_leaf_eligibility_over_operator_heur
     assert state["structural_gaps"] == []
 
 
+def test_unprepared_branch_finding_has_no_stageable_envelope():
+    state = agentic_contract.classify_airflow_gaps(
+        _airflow_report(operator="BranchPythonOperator"), [], prepare_unavailable="file limit"
+    )
+    assert not state["eligible_gaps"]
+    (gap,) = state["structural_gaps"]
+    assert gap["required_capability"] == "graph_patch"
+    assert gap["prepare_unavailable"] == "file limit" and "request_sha256" not in gap
+
+
 def test_airflow_gap_state_fails_closed_when_leaf_eligibility_is_missing() -> None:
     gap = _gap("CustomOperator")
     del gap["allowed_replacement_kinds"]
@@ -403,8 +413,9 @@ def test_airflow_migrate_only_degrades_source_reproducibility_failures(
         )
         assert "snapshot exceeds 10000 files" in result["next_action"]
         assert "source changed" not in result["next_action"]
-        assert result["eligible_gaps"] == []
-        assert result["unsupported_gaps"][0]["code"] == "operator_placeholder"
+        assert result["eligible_gaps"][0]["prepare_unavailable"] == result["prepare_unavailable"]
+        assert "request_sha256" not in result["eligible_gaps"][0]
+        assert not result["unsupported_gaps"]
     else:
         assert result["failed_phase"] == "prepare_agentic"
 
@@ -543,7 +554,9 @@ def test_package_reports_explicitly_acknowledged_unresolved_airflow_gaps(monkeyp
     def package_and_prune(args):
         calls.append([str(value) for value in args])
         report.unlink()
-        return _FakeResult()
+        return _FakeResult(
+            stdout='Airflow gap review: {"accepted_count": 0, "reviewed_count": 0, "unreviewed_count": 1}'
+        )
 
     monkeypatch.setattr(runner, "run_adapter", package_and_prune)
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
@@ -572,7 +585,9 @@ def test_airflow_migrate_resumes_from_reviewed_agentic_report(monkeypatch, tmp_p
     def fake_run_adapter(args):
         calls.append([str(value) for value in args])
         report.unlink()
-        return _FakeResult()
+        return _FakeResult(
+            stdout='Airflow gap review: {"accepted_count": 1, "reviewed_count": 1, "unreviewed_count": 1}'
+        )
 
     monkeypatch.setattr(runner, "run_adapter", fake_run_adapter)
     monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
@@ -681,10 +696,12 @@ def test_hosted_inline_airflow_prepare_and_apply_rematerialize_the_same_source(t
         "dag.py": (
             "from airflow import DAG\n"
             "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+            "from helpers import ProjectOperator\n"
             "with DAG(dag_id='hosted_apply') as dag:\n"
             "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
-            "    second = KubernetesPodOperator(task_id='second', image='python:3.12')\n"
-        )
+            "    second = ProjectOperator(task_id='second')\n"
+        ),
+        "helpers.py": "class ProjectOperator:\n    pass\n",
     }
     output = tmp_path / "out"
     convert_result = server._cmd_convert(
@@ -764,6 +781,27 @@ def test_hosted_inline_airflow_prepare_and_apply_rematerialize_the_same_source(t
     assert apply_result["unreviewed_count"] == 1
     assert (output / ".work" / "translation_report.agentic.json").is_file()
 
+    packaged = server._cmd_migrate(
+        {"source": "airflow", "output_dir": str(output), "resume_agentic": True, "keep_intermediates": True}
+    )
+    assert (packaged["status"], packaged["reviewed_count"], packaged["unreviewed_count"]) == (
+        "completed_with_reviewed_gaps",
+        1,
+        1,
+    )
+    assert server._cmd_resolve_agentic(
+        {"source": "airflow", "action": "apply", "reset": True, "output_dir": str(output)}
+    )["ok"]
+    resume = {"source": "airflow", "resume_agentic": True, "output_dir": str(output)}
+    rejected = server._cmd_migrate(resume)
+    assert (rejected["status"], rejected["reviewed_count"], rejected["unreviewed_count"]) == ("failed", 0, 2)
+    acknowledged = server._cmd_migrate({**resume, "allow_unresolved_gaps": True})
+    assert (acknowledged["status"], acknowledged["reviewed_count"], acknowledged["unreviewed_count"]) == (
+        "packaged_with_unresolved_gaps",
+        0,
+        2,
+    )
+
 
 def test_hosted_airflow_apply_without_source_reports_missing_input(tmp_path: Path) -> None:
     definitions = {
@@ -805,6 +843,25 @@ def test_hosted_airflow_apply_without_source_reports_missing_input(tmp_path: Pat
     assert apply["ok"] is False
     assert "source input is missing" in apply["process"]["stderr"]
     assert "provide --source-path" in apply["process"]["stderr"]
+
+
+def test_hosted_migrate_then_prepare_selected_missing_script(tmp_path: Path):
+    params = {
+        "source": "airflow",
+        "output_dir": str(tmp_path / "out"),
+        "airflow_definitions": {
+            "dag.py": (
+                "from airflow import DAG\nfrom airflow.operators.bash import BashOperator\n"
+                "with DAG(dag_id='missing'):\n    one = BashOperator(task_id='one', bash_command='./missing.sh')\n"
+            )
+        },
+    }
+    paused = server._cmd_migrate(params)
+    gap = paused["eligible_gaps"][0]
+    prepared = server._cmd_resolve_agentic(
+        {**params, "action": "prepare", "report_path": paused["report_path"], "gap_id": gap["gap_id"]}
+    )
+    assert prepared["ok"] and prepared["gaps"] == [gap]
 
 
 def test_airflow_migrate_end_to_end_prepares_gap_without_writing_bundle(tmp_path: Path):
@@ -922,3 +979,242 @@ def test_airflow_migrate_ignores_gaps_from_excluded_dags(tmp_path: Path) -> None
     assert result["ok"] is True
     assert result["status"] == "completed"
     assert "prepare_agentic" not in result["steps"]
+
+
+def _build_candidate_for_gap(gap: dict[str, object], *, status: str = "resolved") -> dict[str, object]:
+    arguments = gap["arguments"]
+    assert isinstance(arguments, list)
+    dispositions = [
+        {
+            "name": argument["name"],
+            "disposition": "preserved_by_flowx" if argument["preserved_by_flowx"] else "consumed",
+            "rationale": "handled in test",
+        }
+        for argument in arguments
+    ]
+    candidate: dict[str, object] = {
+        "contract_version": "1",
+        "gap_id": gap["gap_id"],
+        "status": status,
+        "baseline_report_sha256": gap["baseline_report_sha256"],
+        "source_sha256": gap["source_sha256"],
+        "task_sha256": gap["task_sha256"],
+        "graph_sha256": gap["graph_sha256"],
+        "provider_sha256": gap["provider_sha256"],
+        "request_sha256": gap["request_sha256"],
+        "provider": gap["knowledge_provider"],
+        "model": {"name": "test-model"},
+        "argument_disposition": dispositions,
+        "prerequisites": [],
+        "warnings": [],
+        "semantic_deltas": [],
+    }
+    if status == "resolved":
+        content = "# Databricks notebook source\nprint('migrated')\n"
+        file_path = f"notebooks/{gap['task_key']}.py"
+        candidate["replacement"] = {"kind": "notebook", "file": file_path, "base_parameters": {}}
+        candidate["generated_files"] = [
+            {
+                "path": file_path,
+                "language": "python",
+                "content": content,
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+        ]
+    else:
+        candidate["reason"] = "awaiting remote host mapping"
+    return candidate
+
+
+def test_airflow_migrate_accepting_only_ssh_gap_resumes_as_completed(tmp_path: Path) -> None:
+    source = tmp_path / "ssh_dag.py"
+    source.write_text(
+        "from airflow import DAG\n"
+        "from airflow.providers.ssh.operators.ssh import SSHOperator\n"
+        "with DAG(dag_id='ssh_only') as dag:\n"
+        "    run_ssh = SSHOperator(task_id='run_ssh', ssh_conn_id='prod', command='echo hi')\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+
+    paused = server._cmd_migrate({"source": "airflow", "airflow_source_path": str(source), "output_dir": str(output)})
+    assert paused["status"] == "needs_agentic_resolution"
+    (gap,) = paused["eligible_gaps"]
+
+    assert server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "stage",
+            "candidates": [_build_candidate_for_gap(gap, status="needs_input")],
+            "output_dir": str(output),
+        }
+    )["ok"]
+    assert server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "apply",
+            "accept_gap": gap["gap_id"],
+            "output_dir": str(output),
+        }
+    )["ok"]
+    unresolved_resume = server._cmd_migrate(
+        {"source": "airflow", "output_dir": str(output), "resume_agentic": True, "keep_intermediates": True}
+    )
+    assert (
+        unresolved_resume["status"],
+        unresolved_resume["reviewed_count"],
+        unresolved_resume["unreviewed_count"],
+    ) == ("completed_with_reviewed_gaps", 1, 0)
+
+    assert server._cmd_resolve_agentic(
+        {"source": "airflow", "action": "apply", "reset": True, "output_dir": str(output)}
+    )["ok"]
+    assert server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "stage",
+            "candidates": [_build_candidate_for_gap(gap, status="resolved")],
+            "output_dir": str(output),
+        }
+    )["ok"]
+    applied = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "apply",
+            "accept_gap": gap["gap_id"],
+            "output_dir": str(output),
+        }
+    )
+    assert applied["ok"] is True
+    assert (applied["reviewed_count"], applied["unreviewed_count"]) == (1, 0)
+    agentic_report = json.loads((output / ".work" / "translation_report.agentic.json").read_text(encoding="utf-8"))
+    assert agentic_contract.airflow_gap_findings(agentic_report) == []
+
+    resumed = server._cmd_migrate({"source": "airflow", "output_dir": str(output), "resume_agentic": True})
+    assert (resumed["ok"], resumed["status"], resumed["reviewed_count"], resumed["unreviewed_count"]) == (
+        True,
+        "completed",
+        1,
+        0,
+    )
+
+
+def test_package_parses_airflow_review_counts_from_later_stdout_line(monkeypatch, tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    report = output / ".work" / "translation_report.agentic.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps(_airflow_report(operator="KubernetesPodOperator")), encoding="utf-8")
+
+    monkeypatch.setattr(
+        runner,
+        "run_adapter",
+        lambda _args: _FakeResult(
+            stdout=(
+                "Diagnostic: preparing preflight\n"
+                'Airflow gap review: {"accepted_count": 1, "reviewed_count": 1, "unreviewed_count": 2}\n'
+                "Loading translation report\n"
+            )
+        ),
+    )
+    monkeypatch.setattr(runner, "list_tree", lambda _out: ["databricks.yml"])
+    monkeypatch.setattr(runner, "read_tree", lambda _out: {"files": {}})
+
+    result = server._cmd_package({"output_dir": str(output), "report_path": str(report)})
+    assert (result["status"], result["accepted_count"], result["reviewed_count"], result["unreviewed_count"]) == (
+        "completed_with_reviewed_gaps",
+        1,
+        1,
+        2,
+    )
+
+
+def test_airflow_unreviewed_count_matches_before_review_after_reset_and_after_partial_accept(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    source.mkdir()
+    (source / "parent.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.trigger_dagrun import TriggerDagRunOperator\n"
+        "from airflow.providers.ssh.operators.ssh import SSHOperator\n"
+        "with DAG(dag_id='parent') as dag:\n"
+        "    run_ssh = SSHOperator(task_id='run_ssh', ssh_conn_id='prod', command='echo hi')\n"
+        "    trig = TriggerDagRunOperator(task_id='trig', trigger_dag_id='excluded_child')\n"
+        "    run_ssh >> trig\n",
+        encoding="utf-8",
+    )
+    (source / "excluded_child.py").write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='excluded_child') as dag:\n"
+        "    child = BashOperator(task_id='child', bash_command='echo child')\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+
+    paused = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "airflow_source_path": str(source),
+            "output_dir": str(output),
+            "exclude_dag": ["excluded_child"],
+        }
+    )
+    assert paused["status"] == "needs_agentic_resolution"
+    (gap,) = paused["eligible_gaps"]
+
+    raw_packaged = server._cmd_package(
+        {
+            "output_dir": str(output),
+            "report_path": paused["report_path"],
+            "allow_unresolved_gaps": True,
+            "keep_intermediates": True,
+        }
+    )
+    assert (raw_packaged["status"], raw_packaged["reviewed_count"], raw_packaged["unreviewed_count"]) == (
+        "packaged_with_unresolved_gaps",
+        0,
+        2,
+    )
+
+    reset = server._cmd_resolve_agentic(
+        {"source": "airflow", "action": "apply", "reset": True, "output_dir": str(output)}
+    )
+    assert (reset["ok"], reset["reviewed_count"], reset["unreviewed_count"]) == (True, 0, 2)
+    reset_packaged = server._cmd_migrate(
+        {
+            "source": "airflow",
+            "output_dir": str(output),
+            "resume_agentic": True,
+            "allow_unresolved_gaps": True,
+            "keep_intermediates": True,
+        }
+    )
+    assert (reset_packaged["status"], reset_packaged["reviewed_count"], reset_packaged["unreviewed_count"]) == (
+        "packaged_with_unresolved_gaps",
+        0,
+        2,
+    )
+
+    assert server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "stage",
+            "candidates": [_build_candidate_for_gap(gap, status="resolved")],
+            "output_dir": str(output),
+        }
+    )["ok"]
+    applied = server._cmd_resolve_agentic(
+        {
+            "source": "airflow",
+            "action": "apply",
+            "accept_gap": gap["gap_id"],
+            "output_dir": str(output),
+        }
+    )
+    assert (applied["ok"], applied["reviewed_count"], applied["unreviewed_count"]) == (True, 1, 1)
+
+    resumed = server._cmd_migrate({"source": "airflow", "output_dir": str(output), "resume_agentic": True})
+    assert (resumed["status"], resumed["reviewed_count"], resumed["unreviewed_count"]) == (
+        "completed_with_reviewed_gaps",
+        1,
+        1,
+    )

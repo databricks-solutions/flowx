@@ -120,6 +120,8 @@ For an Airflow report with eligible leaf placeholders, use the `flowx-resolve-ai
 
 If no gap is eligible for the leaf contract and the user deliberately wants a bundle that retains linked failing placeholders, call `package` with the deterministic `report_path` and `allow_unresolved_gaps=true`. The explicit acknowledgment returns `status="packaged_with_unresolved_gaps"`. Without it, package fails before writing bundle files. Reviewed reports remain governed by persisted evidence and return `completed_with_reviewed_gaps` when reviewed placeholders remain.
 
+If no candidate was accepted (including after reset or declining all staged candidates), packaging a report with gaps requires explicit acknowledgment. Pass `allow_unresolved_gaps=true` to MCP package or resume; the status is `packaged_with_unresolved_gaps`. Both return `reviewed_count` and `unreviewed_count` so a partial review is visible separately from acceptance.
+
 The server's `output_dir` is ephemeral and not reachable from your workspace, so **have `migrate`/
 `package` write the DAB to the target via the SDK** — pass `"output_volume_path": "/Volumes/…"` or
 `"output_workspace_path": "/Workspace/…"` and the bundle is uploaded there (returned as

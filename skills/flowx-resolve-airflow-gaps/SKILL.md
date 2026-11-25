@@ -90,3 +90,7 @@ Package the reviewed report explicitly:
 Package replays the kept baseline and accepted candidates before writing bundle files. Missing, modified, or inconsistent evidence fails preflight.
 
 A reviewed report that intentionally retains placeholders returns `completed_with_reviewed_gaps` through MCP. Packaging the original deterministic report instead is an unreviewed decision and requires the separate `allow_unresolved_gaps=true` acknowledgment, which returns `packaged_with_unresolved_gaps`.
+
+If no candidate was accepted (including after reset or declining all staged candidates), packaging a report with gaps requires explicit acknowledgment. Pass `allow_unresolved_gaps=true` to MCP package or resume; the status is `packaged_with_unresolved_gaps`. Both return `reviewed_count` and `unreviewed_count` so a partial review is visible separately from acceptance.
+
+Prepare compares the new source copy with the root recorded at conversion, so a different hosted temporary folder does not invalidate the report. If the whole tree exceeds the snapshot limits, prepare retries with Python files and the scripts, templates, and project paths recorded by translation. If that also fails, migrate reports why. Entries marked `prepare_unavailable` describe gap eligibility only: do not stage a candidate until prepare returns a fingerprint-bound envelope.

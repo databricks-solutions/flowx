@@ -213,6 +213,8 @@ A Databricks App can't read the user's workspace / UC Volume files directly (onl
 
 Unreviewed Airflow reports with unresolved linked placeholders are rejected by `package` unless the caller explicitly passes `allow_unresolved_gaps=true`; a successful acknowledged package returns `packaged_with_unresolved_gaps`. Fingerprint-reviewed reports continue through persisted-evidence validation and report `completed_with_reviewed_gaps` when reviewed placeholders remain.
 
+If no candidate was accepted (including after reset or declining all staged candidates), packaging a report with gaps requires explicit acknowledgment. Pass `allow_unresolved_gaps=true` to MCP package or resume; the status is `packaged_with_unresolved_gaps`. Both return `reviewed_count` and `unreviewed_count` so a partial review is visible separately from acceptance.
+
 ## Known constraints / follow-ups
 
 - **`databricks bundle validate/deploy`** of the *generated* DAB is a separate,

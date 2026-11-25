@@ -323,6 +323,38 @@ def test_prepare_ignores_environment_trees_before_enforcing_snapshot_limits(
     assert [item["path"] for item in manifest["source_files"]] == ["dag.py"]
 
 
+@pytest.mark.parametrize("limit", ["files", "bytes"])
+def test_large_tree_prepares_referenced_snapshot_and_rechecks_missing_scripts(tmp_path, monkeypatch, limit):
+    source = tmp_path / "dags"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\nfrom airflow.operators.bash import BashOperator\n"
+                "from helpers import ProjectOperator\nwith DAG(dag_id='mixed'):\n"
+                "    one = ProjectOperator(task_id='one')\n"
+                "    two = BashOperator(task_id='two', bash_command='./missing.sh')\n"
+            ),
+            "helpers.py": "class ProjectOperator: pass\n",
+            "data/one.dat": "x" * 1024,
+            "data/two.dat": "y" * 1024,
+        },
+    )
+    if limit == "files":
+        monkeypatch.setattr(agentic_contract, "_MAX_SOURCE_SNAPSHOT_FILES", 2)
+    else:
+        monkeypatch.setattr(agentic_contract, "_MAX_SOURCE_SNAPSHOT_BYTES", 512)
+    out = tmp_path / "out"
+    gaps = _prepare_source(source / "dag.py", out)
+    snapshot = out / ".work" / "agentic" / "source"
+    assert (snapshot / "helpers.py").is_file() and not (snapshot / "data").exists()
+    assert _stage(out, _candidate(gaps[0])) == 0
+    agentic_contract.apply_airflow_resolutions(output_dir=out, accepted_gap_ids=[gaps[0]["gap_id"]])
+    (source / "missing.sh").write_text("echo ready\n")
+    with pytest.raises(AgenticContractError, match="source changed since prepare"):
+        agentic_contract.apply_airflow_resolutions(output_dir=out, accepted_gap_ids=[gaps[0]["gap_id"]])
+
+
 def test_prepare_hashes_oversized_sibling_data_without_copying_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1651,7 +1683,9 @@ def test_review_complete_declines_exact_staged_set_and_leaves_unstaged_gaps_unre
     ]
     outcomes = summarize_persisted_agentic_resolutions(evidence)["pipelines"]["agentic"]
     assert outcomes == {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 1, "unreviewed": 1}
-    assert package_main(["--report", str(report), "--output-dir", str(output)]) == 0
+    assert package_main(["--report", str(report), "--output-dir", str(output)]) == 1
+    assert not (output / "databricks.yml").exists()
+    assert package_main(["--report", str(report), "--output-dir", str(output), "--allow-unresolved-gaps"]) == 0
 
 
 def test_package_replays_review_complete_evidence_before_bundle_writes(tmp_path: Path, capsys) -> None:

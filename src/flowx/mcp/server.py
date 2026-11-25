@@ -483,6 +483,16 @@ def _cmd_workspace_paths(p: dict[str, Any]) -> dict[str, Any]:
         cleanup()
 
 
+def _parse_airflow_review_counts(stdout: str) -> dict[str, int]:
+    """Extracts the structured Airflow gap review counts emitted by package."""
+    for line in stdout.splitlines():
+        if line.startswith("Airflow gap review: "):
+            payload = json.loads(line.removeprefix("Airflow gap review: "))
+            if isinstance(payload, dict):
+                return payload
+    return {}
+
+
 def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
     output_dir = p.get("output_dir", "./flowx_output")
     args: list[Any] = [
@@ -514,18 +524,21 @@ def _cmd_package(p: dict[str, Any]) -> dict[str, Any]:
     report = runner.read_json(report_path)
     result = runner.run_adapter(args)
     unresolved_gaps = airflow_gap_findings(report) if result.ok else []
+    counts = _parse_airflow_review_counts(result.stdout)
     status = (
         "failed"
         if not result.ok
         else "completed_with_reviewed_gaps"
-        if report_path.name == "translation_report.agentic.json" and unresolved_gaps
+        if counts.get("accepted_count") and unresolved_gaps
         else "packaged_with_unresolved_gaps"
         if p.get("allow_unresolved_gaps") and unresolved_gaps
         else "completed"
     )
     setup_md = runner.read_text(out / "SETUP.md") or runner.read_text(out / "setup" / "SETUP.md")
     extra = _bundle_output(p, out) if result.ok else {}
-    return _phase_result(result, out, status=status, bundle_files=runner.list_tree(out), setup_md=setup_md, **extra)
+    return _phase_result(
+        result, out, status=status, bundle_files=runner.list_tree(out), setup_md=setup_md, **counts, **extra
+    )
 
 
 def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
@@ -588,32 +601,13 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                 "status": "failed",
                 "error": f"Reviewed Airflow report not found: {reviewed_report}",
             }
-        package_args: list[Any] = [
-            "package",
-            "--output-dir",
-            output_dir,
-            "--catalog",
-            catalog,
-            "--schema",
-            schema,
-            "--report",
-            reviewed_report,
-        ]
-        reviewed_payload = runner.read_json(reviewed_report)
-        package_res = runner.run_adapter(package_args)
-        has_validated_gaps = package_res.ok and bool(airflow_gap_findings(reviewed_payload))
-        extra = _bundle_output(p, out) if package_res.ok else {}
-        steps["package"] = _phase_result(package_res, out, bundle_files=runner.list_tree(out), **extra)
+        package = _cmd_package({**p, "report_path": str(reviewed_report)})
+        steps["package"] = package
         return {
-            "ok": package_res.ok,
-            "status": (
-                "completed_with_reviewed_gaps"
-                if package_res.ok and has_validated_gaps
-                else "completed"
-                if package_res.ok
-                else "failed"
-            ),
-            "failed_phase": None if package_res.ok else "package",
+            "ok": package["ok"],
+            "status": package["status"],
+            **{key: package[key] for key in ("reviewed_count", "unreviewed_count") if key in package},
+            "failed_phase": None if package["ok"] else "package",
             "report_path": str(reviewed_report),
             "steps": steps,
         }
@@ -733,7 +727,7 @@ def _cmd_migrate(p: dict[str, Any]) -> dict[str, Any]:
                         payload = runner.read_json(out / ".work" / "agentic" / "gaps.json")
                         if isinstance(payload, list):
                             prepared_gaps = [gap for gap in payload if isinstance(gap, dict)]
-                state = classify_airflow_gaps(report, prepared_gaps)
+                state = classify_airflow_gaps(report, prepared_gaps, prepare_unavailable=prepare_unavailable)
                 if prepare_unavailable:
                     unavailable_reason = prepare_unavailable.strip()
                     next_action = (
@@ -974,13 +968,16 @@ def build_server() -> FastMCP:
           ``status="needs_agentic_resolution"`` with ``eligible_gaps`` (v1 leaf envelopes),
           ``structural_gaps`` (future GraphPatch or task-policy work), and ``unsupported_gaps``
           (source-level semantics outside leaf replacement).
+          If prepare is unavailable, eligible entries describe potential leaf gaps, not stageable envelopes.
+          Correct the reported snapshot problem and run prepare before staging candidates.
         - Run ``resolve_agentic`` stage/apply with reviewed candidates. A hosted apply must resupply
           the same Airflow source input used for prepare. Then call ``migrate`` with ``source="airflow"``,
           the same ``output_dir``, and ``resume_agentic=true``. The reviewed report is passed explicitly
           to package, where persisted evidence and reconciliation are validated before bundle files are
           written. A successful package that retains reviewed placeholders returns
           ``status="completed_with_reviewed_gaps"`` rather than claiming the migration is semantically complete.
-          Apply responses include ``reviewed_count`` and ``unreviewed_count`` so partial reviews stay explicit.
+          Apply, resume and package report review counts. With zero accepted candidates and unresolved
+          gaps, resume or package requires ``allow_unresolved_gaps=true``, even after reset or decline-all.
         - When no gap is eligible for leaf resolution, no agentic report exists to resume. To retain
           those linked failing placeholders intentionally, call ``package`` separately with the
           deterministic ``report_path`` returned by ``migrate`` and ``allow_unresolved_gaps=true``.
