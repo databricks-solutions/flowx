@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from flowx.models.ir import PlaceholderActivity, SparkPythonActivity
+from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow.loader import load_airflow_dags
 
 
@@ -107,6 +108,105 @@ def test_databricks_paths_are_left_to_package(tmp_path: Path) -> None:
     pipeline = _load(tmp_path, "BashOperator(task_id='job', bash_command='spark-submit /Workspace/jobs/etl.py')")
 
     assert pipeline.tasks[0].generated_source is None
+
+
+def _write_script(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _packaged(prepared) -> tuple[dict[str, str], dict[str, str]]:
+    """Returns each task's python_file path (under src/) and the notebook content at each packaged path."""
+    python_files = {
+        task["task_key"]: task["spark_python_task"]["python_file"].removeprefix("../src/") for task in prepared.tasks
+    }
+    contents = {notebook.relative_path: notebook.content for notebook in prepared.notebooks}
+    return python_files, contents
+
+
+def test_different_scripts_with_one_file_name_package_to_distinct_files(tmp_path: Path) -> None:
+    _write_script(tmp_path / "export" / "home" / "alice" / "jobs" / "load.py", "print('alice')\n")
+    _write_script(tmp_path / "export" / "home" / "bob" / "jobs" / "load.py", "print('bob')\n")
+    pipeline = _load_dag(
+        tmp_path,
+        "BashOperator(task_id='load_alice', bash_command='spark-submit /home/alice/jobs/load.py')",
+        "BashOperator(task_id='load_bob', bash_command='spark-submit /home/bob/jobs/load.py')",
+    )
+
+    prepared = prepare_workflow(pipeline)
+
+    python_files, contents = _packaged(prepared)
+    assert python_files == {
+        "load_alice": "scripts/load_alice/load.py",
+        "load_bob": "scripts/load_bob/load.py",
+    }
+    assert contents[python_files["load_alice"]] == "print('alice')\n"
+    assert contents[python_files["load_bob"]] == "print('bob')\n"
+    assert len(prepared.notebooks) == 2
+
+
+def test_dbfs_scripts_with_one_file_name_package_to_distinct_files(tmp_path: Path) -> None:
+    # Databricks paths are placeholders when downloads are off; each placeholder names its own source path.
+    first, second = "dbfs:/a/load.py", "dbfs:/b/load.py"
+    pipeline = _load_dag(
+        tmp_path,
+        f"SparkSubmitOperator(task_id='load_first', application='{first}')",
+        f"SparkSubmitOperator(task_id='load_second', application='{second}')",
+    )
+
+    prepared = prepare_workflow(pipeline)
+
+    python_files, contents = _packaged(prepared)
+    assert python_files["load_first"] != python_files["load_second"]
+    assert first in contents[python_files["load_first"]]
+    assert second in contents[python_files["load_second"]]
+    assert second not in contents[python_files["load_first"]]
+
+
+def test_tasks_running_one_script_share_one_packaged_file(tmp_path: Path) -> None:
+    _write_script(tmp_path / "export" / "home" / "alice" / "jobs" / "load.py", "print('load')\n")
+    pipeline = _load_dag(
+        tmp_path,
+        "BashOperator(task_id='worker_1', bash_command='spark-submit /home/alice/jobs/load.py --part 1')",
+        "BashOperator(task_id='worker_2', bash_command='spark-submit /home/alice/jobs/load.py --part 2')",
+    )
+
+    prepared = prepare_workflow(pipeline)
+
+    python_files, contents = _packaged(prepared)
+    assert python_files == {"worker_1": "scripts/load.py", "worker_2": "scripts/load.py"}
+    assert list(contents) == ["scripts/load.py"]
+
+
+def test_script_paths_do_not_depend_on_task_order(tmp_path: Path) -> None:
+    _write_script(tmp_path / "export" / "home" / "alice" / "jobs" / "load.py", "print('alice')\n")
+    _write_script(tmp_path / "export" / "home" / "bob" / "jobs" / "load.py", "print('bob')\n")
+    alice = "BashOperator(task_id='load_alice', bash_command='spark-submit /home/alice/jobs/load.py')"
+    bob = "BashOperator(task_id='load_bob', bash_command='spark-submit /home/bob/jobs/load.py')"
+
+    def packaged_paths(*tasks: str) -> dict[str, str]:
+        prepared = prepare_workflow(_load_dag(tmp_path, *tasks))
+        return _packaged(prepared)[0]
+
+    assert packaged_paths(alice, bob) == packaged_paths(bob, alice)
+
+
+def _load_dag(tmp_path: Path, *tasks: str):
+    root = tmp_path / "export"
+    dag_path = root / "dags" / "dag.py"
+    dag_path.parent.mkdir(parents=True, exist_ok=True)
+    body = "".join(f"    {task}\n" for task in tasks)
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator\n"
+        "with DAG(dag_id='d', schedule_interval='15 * * * *', catchup=False) as dag:\n"
+        f"{body}",
+        encoding="utf-8",
+    )
+    pipelines = load_airflow_dags(dag_path, source_root=root)
+    assert len(pipelines) == 1
+    return pipelines[0]
 
 
 def _load(tmp_path: Path, task: str):
