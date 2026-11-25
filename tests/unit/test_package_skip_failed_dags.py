@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -197,3 +198,15 @@ def test_trigger_of_a_left_out_dag_needs_acknowledgment_like_an_excluded_one(
     assert _package(output, "--skip-failed-dags") == 1
     assert not (output / "resources").exists()
     assert "--allow-unresolved-gaps" in capsys.readouterr().err
+
+
+def test_trigger_placeholders_of_left_out_dags_count_as_unreviewed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = _convert(tmp_path, {"good.py": _GOOD, "bad.py": _BAD, "caller.py": _CALLER})
+    capsys.readouterr()
+
+    assert _package(output, "--skip-failed-dags", "--allow-unresolved-gaps") == 0
+
+    line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("Airflow gap review: "))
+    assert json.loads(line.removeprefix("Airflow gap review: "))["unreviewed_count"] == 1

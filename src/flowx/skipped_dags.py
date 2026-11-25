@@ -197,3 +197,14 @@ def without_skipped_dag_references(
         ]
     updated["audit"] = audit
     return updated
+
+
+def skipped_dag_reference_count(
+    pipeline_dict: dict[str, Any],
+    skipped_dags: frozenset[str],
+    *,
+    unpackaged_targets: frozenset[str] | None = None,
+) -> int:
+    """Returns how many tasks of a report pipeline :func:`without_skipped_dag_references` turns into placeholders."""
+    updated = without_skipped_dag_references(pipeline_dict, skipped_dags, unpackaged_targets=unpackaged_targets)
+    return len(updated.get("not_translatable") or []) - len(pipeline_dict.get("not_translatable") or [])

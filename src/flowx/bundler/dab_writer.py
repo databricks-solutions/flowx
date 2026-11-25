@@ -68,6 +68,7 @@ from flowx.preparer.workspace_downloader import (
 )
 from flowx.skipped_dags import (
     failed_airflow_pipelines,
+    skipped_dag_reference_count,
     unpackaged_trigger_targets,
     without_skipped_dag_references,
 )
@@ -3221,17 +3222,18 @@ def _report_reconciliation_failures(
 
             counts.update(accepted_count=0, reviewed_count=0)
             counts["unreviewed_count"] = counts.get("unreviewed_count", 0) + airflow_pipeline_gap_count(pipeline)
+        # Placeholders this run adds for tasks that trigger a left-out DAG are unreviewed gaps too.
+        left_out_references = (
+            skipped_dag_reference_count(pipeline, skipped_dags, unpackaged_targets=unpackaged_targets)
+            if skipped_dags
+            else 0
+        )
+        counts["unreviewed_count"] = counts.get("unreviewed_count", 0) + left_out_references
         if gap_findings and not counts["accepted_count"] and not allow_unresolved_gaps:
             failures.append(
                 f"{label}: unresolved Airflow gaps require an accepted agentic candidate or --allow-unresolved-gaps"
             )
-        elif (
-            skipped_dags
-            and not counts["accepted_count"]
-            and not allow_unresolved_gaps
-            and without_skipped_dag_references(pipeline, skipped_dags, unpackaged_targets=unpackaged_targets)
-            is not pipeline
-        ):
+        elif left_out_references and not counts["accepted_count"] and not allow_unresolved_gaps:
             failures.append(
                 f"{label}: tasks that trigger a DAG left out by --skip-failed-dags become placeholders, which "
                 "require an accepted agentic candidate or --allow-unresolved-gaps"
