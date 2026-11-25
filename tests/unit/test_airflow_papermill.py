@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from flowx.models.ir import NotebookActivity, PlaceholderActivity
+from flowx.preparer.workflow_preparer import prepare_workflow
 from flowx.sources.airflow import papermill
 from flowx.sources.airflow.loader import load_airflow_dags
 
@@ -358,3 +359,27 @@ def test_capture_with_a_name_becomes_a_placeholder_end_to_end(tmp_path: Path) ->
     task = _by_key(pipeline)["captured"]
     assert isinstance(task, PlaceholderActivity)
     assert "%%capture" in task.comment
+
+
+def test_notebooks_sharing_a_basename_package_as_distinct_files(tmp_path: Path) -> None:
+    # Packaged notebooks are named after their task, so two notebooks called daily.ipynb in different
+    # folders must not overwrite each other in the bundle.
+    _write_notebook(tmp_path / "a" / "daily.ipynb", [_code("print('a')")])
+    _write_notebook(tmp_path / "b" / "daily.ipynb", [_code("print('b')")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='two_daily') as dag:\n"
+        "    PapermillOperator(task_id='run_a', input_nb='/home/jdoe/a/daily.ipynb', output_nb='o.ipynb')\n"
+        "    PapermillOperator(task_id='run_b', input_nb='/home/jdoe/b/daily.ipynb', output_nb='o.ipynb')\n",
+    )
+    prepared = prepare_workflow(pipeline)
+
+    contents = {notebook.relative_path: notebook.content for notebook in prepared.notebooks}
+    assert len(contents) == 2
+    task_notebooks = {
+        task["task_key"]: task["notebook_task"]["notebook_path"].removeprefix("../src/") for task in prepared.tasks
+    }
+    assert set(task_notebooks) == {"run_a", "run_b"}
+    assert task_notebooks["run_a"] != task_notebooks["run_b"]
+    assert "print('a')" in contents[task_notebooks["run_a"]]
+    assert "print('b')" in contents[task_notebooks["run_b"]]
