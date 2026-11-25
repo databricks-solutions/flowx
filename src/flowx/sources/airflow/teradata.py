@@ -154,8 +154,9 @@ def _split_operators(word: str) -> list[str]:
     return operators
 
 
-# Two words side by side, as in ``cd x``, which an arithmetic expression never has.
-_ADJACENT_WORDS = re.compile(r"[A-Za-z_][\w./-]*\s+[A-Za-z_./]")
+# Two words side by side, as in ``cd x`` or ``cd /tmp``, which an arithmetic expression never has. A ``/``
+# followed by a space is division, as in ``total / count``, not the start of a path.
+_ADJACENT_WORDS = re.compile(r"[A-Za-z_][\w./-]*\s+(?:[A-Za-z_]|[./][\w./-])")
 _COMMAND_SUBSTITUTION = re.compile(r"\$\([^()]*\)|`[^`]*`")
 
 

@@ -21,8 +21,8 @@ _RESOURCE_SUFFIXES = frozenset({".sql", ".py", ".yml", ".yaml", ".md", ".csv"})
 _ENV_VAR = re.compile(r"""env_var\(\s*['"]([^'"]+)['"]\s*\)""")
 # Files that declare dbt packages, which a fresh task environment installs with ``dbt deps``.
 _PACKAGE_FILES = ("packages.yml", "dependencies.yml")
-# A YAML file name that suggests credentials, such as ``secrets.yml``, left out of a copy of the project root.
-_CREDENTIAL_NAME = re.compile(r"secret|credential", re.IGNORECASE)
+# Names of YAML files that hold credentials, such as ``secrets.yml``, left out of a copy of the project root.
+_CREDENTIAL_NAMES = frozenset({"secret", "secrets", "credential", "credentials"})
 # The most commands a Databricks dbt task runs.
 MAX_TASK_COMMANDS = 10
 # The dbt_project.yml settings that name the project's folders, with dbt's defaults.
@@ -224,7 +224,7 @@ def project_artifacts(project: Path, destination_root: str, *, include_packages:
                 )
                 if not (
                     Path(artifact.relative_path).suffix in {".yml", ".yaml"}
-                    and _CREDENTIAL_NAME.search(Path(artifact.relative_path).stem)
+                    and Path(artifact.relative_path).stem.lower() in _CREDENTIAL_NAMES
                 )
             )
         else:
