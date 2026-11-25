@@ -133,6 +133,7 @@ SUMMARY_DISCLOSURES = frozenset(
         "dag_id_not_static",
         "max_concurrent_runs_defaulted",
         "shell_dbt_lowered_to_dbt_task",
+        "papermill_notebook_converted",
     }
 )
 

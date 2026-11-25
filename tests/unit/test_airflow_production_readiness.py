@@ -218,7 +218,7 @@ def test_spark_submit_requires_a_single_invocation_and_known_option_arities() ->
     first, second, third = pipeline.tasks
 
     assert isinstance(first, SparkPythonActivity)
-    assert first.python_file == "/jobs/etl.py"
+    assert first.python_file == "dbfs:/jobs/etl.py"
     assert first.parameters == ["--date", "2024-01-01"]
     assert isinstance(second, PlaceholderActivity)
     assert second.raw_definition["unavailable_programs"] == ["spark-submit"]

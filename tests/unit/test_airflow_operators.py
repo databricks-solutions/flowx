@@ -194,6 +194,9 @@ def test_bash_operator_becomes_sh_notebook():
     assert "%sh" in task.generated_source
     # No macros -> no widget prelude, just the %sh cell.
     assert "dbutils.widgets" not in task.generated_source
+    # Databricks runs a cell as %sh only when the magic is its first line, so the header is its own cell.
+    sh_cell = task.generated_source.split("# COMMAND ----------")[-1].strip("\n")
+    assert sh_cell.startswith("# MAGIC %sh\n")
 
 
 def test_bash_operator_macros_thread_through_shell_env_vars():
@@ -265,11 +268,11 @@ def test_bash_operator_wrapping_spark_submit_becomes_spark_task():
         "from airflow import DAG\n"
         "from airflow.operators.bash import BashOperator\n"
         "with DAG(dag_id='d') as dag:\n"
-        "    t = BashOperator(task_id='j', bash_command='spark-submit --master yarn /opt/etl.py --date x')\n"
+        "    t = BashOperator(task_id='j', bash_command='spark-submit --master yarn dbfs:/opt/etl.py --date x')\n"
     )
     task = _by_key(p)["j"]
     assert isinstance(task, SparkPythonActivity)
-    assert task.python_file == "/opt/etl.py"
+    assert task.python_file == "dbfs:/opt/etl.py"
     assert task.parameters == ["--date", "x"]
 
 
@@ -278,7 +281,7 @@ def test_spark_submit_python_and_jar():
         "from airflow import DAG\n"
         "from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator\n"
         "with DAG(dag_id='d') as dag:\n"
-        "    a = SparkSubmitOperator(task_id='py', application='/o/e.py', application_args=['--d','1'])\n"
+        "    a = SparkSubmitOperator(task_id='py', application='dbfs:/o/e.py', application_args=['--d','1'])\n"
         "    b = SparkSubmitOperator(task_id='jar', application='/o/a.jar', java_class='com.X')\n"
     )
     tasks = _by_key(p)

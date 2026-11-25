@@ -16,8 +16,11 @@ _RECOGNIZED_DAG_SETTINGS = frozenset(
         "schedule",
         "schedule_interval",
         "start_date",
+        "default_args.start_date",
         "timezone",
         "catchup",
+        "concurrency",
+        "max_active_tasks",
         "default_args",
         "params",
         "default_args.retries",
@@ -88,8 +91,93 @@ def _job_timeout_seconds(visitor: _DagVisitor) -> int | None:
 
 
 def job_max_concurrent_runs(visitor: _DagVisitor) -> int | None:
-    """Returns the DAG's static positive ``max_active_runs``, the Databricks job's ``max_concurrent_runs``."""
-    value = ops.literal_value(visitor.dag_kwargs.get("max_active_runs"))
+    """Returns the Databricks job's ``max_concurrent_runs`` from the DAG's static run and task limits.
+
+    ``max_active_runs`` caps runs directly. In a DAG with a single task, ``concurrency`` (or its Airflow 2.2+
+    name ``max_active_tasks``) also caps runs, since each run is that one task; the lower limit wins.
+    """
+    limits = [
+        limit
+        for limit in (_static_positive_int(visitor.dag_kwargs.get("max_active_runs")), single_task_concurrency(visitor))
+        if limit is not None
+    ]
+    return min(limits) if limits else None
+
+
+def single_task_concurrency(visitor: _DagVisitor) -> int | None:
+    """Returns the DAG's static ``concurrency`` / ``max_active_tasks`` when the DAG has exactly one task.
+
+    The limit counts running task instances across all of a DAG's runs, which Databricks Jobs has no
+    setting for. With one task per run it is the same as a limit on concurrent runs.
+    """
+    task_count = len(visitor.operators) + len(visitor.taskflow_tasks) + len(visitor.taskgroup_calls)
+    if task_count != 1:
+        return None
+    names = [name for name in ("max_active_tasks", "concurrency") if name in visitor.dag_kwargs]
+    limits = {_static_positive_int(visitor.dag_kwargs[name]) for name in names}
+    if not names or None in limits:
+        return None
+    return min(limit for limit in limits if limit is not None)
+
+
+def task_limit_never_binds(visitor: _DagVisitor) -> bool:
+    """Returns whether a static ``max_active_tasks`` / ``concurrency`` can never make a task wait.
+
+    With one active run at a time (a static ``max_active_runs`` of 1), the most tasks that can run together
+    is the DAG's widest set of tasks with no dependency path between any two of them. A limit at least that
+    wide never holds a task back, so dropping it changes nothing. Any other case stays a gap.
+    """
+    if visitor.taskflow_tasks or visitor.taskgroup_calls:
+        return False
+    if _static_positive_int(visitor.dag_kwargs.get("max_active_runs")) != 1:
+        return False
+    names = [name for name in ("max_active_tasks", "concurrency") if name in visitor.dag_kwargs]
+    limits = [_static_positive_int(visitor.dag_kwargs[name]) for name in names]
+    if not names or any(limit is None for limit in limits):
+        return False
+    edges = [(edge.upstream_id, edge.downstream_id) for edge in visitor.edge_captures]
+    return min(limit for limit in limits if limit is not None) >= parallel_width(list(visitor.operators), edges)
+
+
+def parallel_width(tasks: list[str], edges: list[tuple[str, str]]) -> int:
+    """Returns the most tasks that can run at once: the largest set with no dependency path between any two.
+
+    By Dilworth's theorem this is the task count minus a maximum matching between each task and the tasks it
+    can reach. An edge naming an unknown task is ignored, which can only make the result larger.
+    """
+    index = {task: position for position, task in enumerate(tasks)}
+    children: list[list[int]] = [[] for _ in tasks]
+    for upstream, downstream in edges:
+        if upstream in index and downstream in index:
+            children[index[upstream]].append(index[downstream])
+    reachable: list[set[int]] = []
+    for start in range(len(tasks)):
+        seen: set[int] = set()
+        stack = list(children[start])
+        while stack:
+            node = stack.pop()
+            if node not in seen:
+                seen.add(node)
+                stack.extend(children[node])
+        reachable.append(seen)
+    matched_to: list[int] = [-1] * len(tasks)
+
+    def augment(task: int, visited: set[int]) -> bool:
+        for later in reachable[task]:
+            if later in visited:
+                continue
+            visited.add(later)
+            if matched_to[later] == -1 or augment(matched_to[later], visited):
+                matched_to[later] = task
+                return True
+        return False
+
+    matching = sum(augment(task, set()) for task in range(len(tasks)))
+    return len(tasks) - matching
+
+
+def _static_positive_int(node: ast.expr | None) -> int | None:
+    value = ops.literal_value(node)
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
@@ -168,8 +256,26 @@ def _dag_setting_disposition(name: str, visitor: _DagVisitor) -> dict[str, str] 
             ),
             "rationale": "template_searchpath_not_statically_resolvable",
         }
+    if name in ("concurrency", "max_active_tasks"):
+        if single_task_concurrency(visitor) is not None:
+            return {
+                "status": "mapped",
+                "target": "job.max_concurrent_runs",
+                "rationale": "single_task_dag_task_limit_is_a_run_limit",
+            }
+        if task_limit_never_binds(visitor):
+            return {"status": "ignored", "rationale": "task_limit_at_least_the_dag_parallel_width_with_one_active_run"}
+        return {
+            "status": "gap",
+            "message": (
+                f"Airflow {name} limits running task instances across the DAG's runs, which Databricks Jobs has "
+                "no setting for; it maps to Job max_concurrent_runs only for a single-task DAG with a static "
+                "positive integer."
+            ),
+            "rationale": "task_concurrency_has_no_job_setting",
+        }
     if name == "max_active_runs":
-        if job_max_concurrent_runs(visitor) is not None:
+        if _static_positive_int(visitor.dag_kwargs.get("max_active_runs")) is not None:
             return {
                 "status": "mapped",
                 "target": "job.max_concurrent_runs",

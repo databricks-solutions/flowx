@@ -352,6 +352,21 @@ class TestSparkPythonPreparer:
         prepared = prepare_activity(activity)
         assert prepared.task["libraries"] == libraries
 
+    def test_prepare_spark_python_without_compute_runs_on_serverless(self):
+        activity = SparkPythonActivity(**_make_base("Py Task", "py_task"), python_file="dbfs:/scripts/etl.py")
+        prepared = prepare_activity(activity)
+        assert prepared.task["environment_key"] == "serverless"
+        assert prepared.environments == [{"environment_key": "serverless", "spec": {"environment_version": "5"}}]
+
+    def test_prepare_spark_python_with_a_cluster_needs_no_environment(self):
+        activity = SparkPythonActivity(
+            **{**_make_base("Py Task", "py_task"), "cluster": {"_bind_default_cluster": True}},
+            python_file="dbfs:/scripts/etl.py",
+        )
+        prepared = prepare_activity(activity)
+        assert "environment_key" not in prepared.task
+        assert prepared.environments == []
+
 
 class TestLookupPreparer:
     def test_prepare_lookup_generates_notebook(self):

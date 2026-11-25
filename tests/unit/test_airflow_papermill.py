@@ -1,0 +1,385 @@
+"""Unit tests for Airflow PapermillOperator -> Databricks notebook task."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from flowx.models.ir import NotebookActivity, PlaceholderActivity
+from flowx.preparer.workflow_preparer import prepare_workflow
+from flowx.sources.airflow import papermill
+from flowx.sources.airflow.loader import load_airflow_dags
+
+_IMPORTS = (
+    "from datetime import timedelta\n"
+    "from pathlib import Path\n"
+    "from airflow.models import DAG\n"
+    "from airflow.providers.papermill.operators.papermill import PapermillOperator\n"
+)
+
+
+def test_jupyterhub_tutorial_dag_becomes_a_packaged_notebook_task(tmp_path: Path) -> None:
+    # The notebook path is built from module constants and points at the JupyterHub machine, so the
+    # notebook is found by name under the folder discover reads.
+    _write_notebook(
+        tmp_path / "export" / "analyst" / "demos" / "scheduled_job.ipynb",
+        [_markdown("# Scheduled job"), _code("df = spark.sql('select 1')\ndf.write.saveAsTable('sandbox.t')")],
+    )
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "username = 'analyst'\n"
+        "home_dir = Path('/home', username)\n"
+        "outputs_dir = Path(home_dir, 'outputs')\n"
+        "with DAG(dag_id=f'{username}_job', schedule_interval=timedelta(hours=1), catchup=False) as dag:\n"
+        "    PapermillOperator(\n"
+        "        task_id='run_notebook',\n"
+        "        input_nb=str(Path(home_dir, 'demos/scheduled_job.ipynb')),\n"
+        "        output_nb=str(Path(outputs_dir, 'scheduled_job.ipynb')),\n"
+        "    )\n",
+    )
+    task = _by_key(pipeline)["run_notebook"]
+
+    assert isinstance(task, NotebookActivity)
+    assert task.base_parameters is None
+    assert task.generated_source.startswith("# Databricks notebook source\n")
+    assert "# MAGIC %md\n# MAGIC # Scheduled job" in task.generated_source
+    assert "df.write.saveAsTable('sandbox.t')" in task.generated_source
+    compile(task.generated_source, "notebook.py", "exec")
+    disclosure = _disclosure(pipeline, "papermill_notebook_converted")
+    assert disclosure["input_nb"] == "/home/analyst/demos/scheduled_job.ipynb"
+    assert disclosure["output_nb"] == "/home/analyst/outputs/scheduled_job.ipynb"
+
+
+def test_parameters_become_base_parameters_and_widgets_stay_task_local(tmp_path: Path) -> None:
+    _write_notebook(
+        tmp_path / "dags" / "report.ipynb",
+        [_code("run_date = None\nlimit = 5\nregion = 'us'", tags=["parameters"]), _code("print(run_date, limit)")],
+    )
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='report', schedule_interval='0 6 * * *') as dag:\n"
+        "    PapermillOperator(task_id='report', input_nb='report.ipynb', output_nb='out.ipynb',\n"
+        "        parameters={'run_date': '{{ ds }}', 'limit': 10, 'owner': 'analytics'})\n",
+        dag_folder="dags",
+    )
+    task = _by_key(pipeline)["report"]
+
+    assert isinstance(task, NotebookActivity)
+    assert task.base_parameters is not None
+    assert task.base_parameters["limit"] == "10"
+    assert task.base_parameters["owner"] == "analytics"
+    assert "{{ ds }}" not in task.base_parameters["run_date"]
+    source = task.generated_source
+    # The DAG passes a date string, so run_date is read as text even though the notebook default is None.
+    assert "run_date = _papermill_parameter('run_date', 'None', as_text=True)" in source
+    assert "limit = _papermill_parameter('limit', '5', as_text=False)" in source
+    assert "region = _papermill_parameter('region', 'us', as_text=True)" in source
+    assert "owner = _papermill_parameter('owner', '', as_text=True)" in source
+    compile(source, "notebook.py", "exec")
+    declared = {parameter["name"] for parameter in pipeline.parameters or []}
+    assert not {"run_date", "limit", "region", "owner"} & declared
+
+
+def test_braces_in_notebook_code_are_not_treated_as_templates(tmp_path: Path) -> None:
+    _write_notebook(tmp_path / "braces.ipynb", [_code("name = 'x'\nprint(f'{{{{name}}}} is {name}')")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='braces') as dag:\n"
+        "    PapermillOperator(task_id='braces', input_nb='braces.ipynb', output_nb='o.ipynb')\n",
+    )
+
+    task = _by_key(pipeline)["braces"]
+    assert isinstance(task, NotebookActivity)
+    assert "{{{{name}}}}" in task.generated_source
+
+
+def test_missing_notebook_becomes_a_placeholder(tmp_path: Path) -> None:
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='gone') as dag:\n"
+        "    PapermillOperator(task_id='gone', input_nb='/home/u/missing.ipynb', output_nb='/tmp/o.ipynb')\n",
+    )
+    task = _by_key(pipeline)["gone"]
+
+    assert isinstance(task, PlaceholderActivity)
+    assert "was not found" in task.comment
+
+
+def test_dynamic_input_path_becomes_a_placeholder(tmp_path: Path) -> None:
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "import os\n"
+        "with DAG(dag_id='dynamic') as dag:\n"
+        "    PapermillOperator(task_id='dynamic', input_nb=os.environ['NB'], output_nb='/tmp/o.ipynb')\n",
+    )
+
+    assert isinstance(_by_key(pipeline)["dynamic"], PlaceholderActivity)
+
+
+def test_unsupported_magic_becomes_a_placeholder(tmp_path: Path) -> None:
+    _write_notebook(tmp_path / "spark_magic.ipynb", [_code("%%configure -f\n{'conf': {}}")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='magic') as dag:\n"
+        "    PapermillOperator(task_id='magic', input_nb='spark_magic.ipynb', output_nb='o.ipynb')\n",
+    )
+    task = _by_key(pipeline)["magic"]
+
+    assert isinstance(task, PlaceholderActivity)
+    assert "%%configure" in task.comment
+
+
+def test_parameters_cell_that_already_reads_widgets_becomes_a_placeholder(tmp_path: Path) -> None:
+    _write_notebook(
+        tmp_path / "widgets.ipynb",
+        [
+            _code('dbutils.widgets.text("limit", "1000")\nlimit = dbutils.widgets.get("limit")', tags=["parameters"]),
+            _code("print(int(limit))"),
+        ],
+    )
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='widgets') as dag:\n"
+        "    PapermillOperator(task_id='widgets', input_nb='widgets.ipynb', output_nb='o.ipynb',\n"
+        "                      parameters={'limit': 500})\n",
+    )
+    task = _by_key(pipeline)["widgets"]
+
+    assert isinstance(task, PlaceholderActivity)
+    assert "already reads dbutils widgets" in task.comment
+
+
+def test_non_python_kernel_becomes_a_placeholder(tmp_path: Path) -> None:
+    _write_notebook(tmp_path / "r.ipynb", [_code("print(1)")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='r') as dag:\n"
+        "    PapermillOperator(task_id='r', input_nb='r.ipynb', output_nb='o.ipynb', kernel_name='ir')\n",
+    )
+
+    assert isinstance(_by_key(pipeline)["r"], PlaceholderActivity)
+
+
+def test_convert_notebook_handles_magics_pip_and_injected_cells() -> None:
+    document = _document(
+        [
+            _code("%matplotlib inline\n!pip install tqdm\nimport tqdm"),
+            _code("%%sql\nselect 1"),
+            _code("%%time\nresult = 1 + 1"),
+            _code("query = '''\n%s rows\n!important\n'''\nprint(query)"),
+            _code("run_date = '2024-01-01'", tags=["injected-parameters"]),
+        ]
+    )
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "# MAGIC %pip install tqdm" in converted.source
+    assert "%matplotlib" not in converted.source
+    assert "# MAGIC %sql\n# MAGIC select 1" in converted.source
+    assert "%%time" not in converted.source and "result = 1 + 1" in converted.source
+    assert "%s rows\n!important" in converted.source
+    assert "2024-01-01" not in converted.source
+    compile(converted.source, "notebook.py", "exec")
+
+
+def test_parameters_without_a_parameters_cell_are_injected_at_the_top() -> None:
+    document = _document([_code("print(region)")])
+
+    converted = papermill.convert_notebook(
+        document, task_id="t", notebook_name="n.ipynb", passed_parameters={"region": "eu"}
+    )
+
+    assert converted.parameter_names == ["region"]
+    cells = _cells(converted.source)
+    assert cells[0].startswith("# Migrated from Airflow PapermillOperator 't'")
+    assert "region = _papermill_parameter('region', '', as_text=True)" in cells[1]
+    assert "print(region)" in cells[2]
+
+
+def test_every_magic_cell_starts_with_its_magic() -> None:
+    # Databricks reads a cell as markdown, SQL, or shell only when the magic is the cell's first line.
+    document = _document(
+        [
+            _markdown("# Title\nSome text."),
+            _code("!pip install tqdm"),
+            _code("%%sql\nselect 1"),
+            _code("%%bash\necho hi"),
+            _code("print(1)"),
+        ]
+    )
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    magic_cells = [cell for cell in _cells(converted.source) if "# MAGIC" in cell]
+    assert len(magic_cells) == 4
+    assert all(cell.startswith("# MAGIC %") for cell in magic_cells)
+
+
+def test_locate_notebook_prefers_the_longest_matching_folder_path(tmp_path: Path) -> None:
+    for owner in ("alice", "bob"):
+        _write_notebook(tmp_path / owner / "etl" / "daily.ipynb", [_code("print(1)")])
+
+    found, _ = papermill.locate_notebook("/home/bob/etl/daily.ipynb", (), tmp_path)
+    ambiguous, detail = papermill.locate_notebook("/home/carol/daily.ipynb", (), tmp_path)
+
+    assert found == tmp_path / "bob" / "etl" / "daily.ipynb"
+    assert ambiguous is None and "matches 2 files" in detail
+
+
+def test_locate_notebook_rejects_remote_paths(tmp_path: Path) -> None:
+    found, detail = papermill.locate_notebook("s3://bucket/n.ipynb", (), tmp_path)
+
+    assert found is None and "remote s3://" in detail
+
+
+def _load_one(root: Path, dag_source: str, *, dag_folder: str = ".") -> object:
+    dag_path = root / dag_folder / "dag.py"
+    dag_path.parent.mkdir(parents=True, exist_ok=True)
+    dag_path.write_text(dag_source, encoding="utf-8")
+    pipelines = load_airflow_dags(dag_path, source_root=root)
+    assert len(pipelines) == 1
+    return pipelines[0]
+
+
+def _cells(source: str) -> list[str]:
+    """Splits Databricks notebook source into its cells, without the file header."""
+    body = source.removeprefix("# Databricks notebook source\n")
+    return [cell.strip("\n") for cell in body.split("# COMMAND ----------")]
+
+
+def _by_key(pipeline: object) -> dict[str, object]:
+    return {task.task_key: task for task in pipeline.tasks}  # type: ignore[attr-defined]
+
+
+def _disclosure(pipeline: object, code: str) -> dict[str, object]:
+    transformations = pipeline.audit.get("transformations", [])  # type: ignore[attr-defined]
+    return next(item for item in transformations if item.get("code") == code)
+
+
+def _code(source: str, *, tags: list[str] | None = None) -> dict[str, object]:
+    return {"cell_type": "code", "metadata": {"tags": tags or []}, "source": source, "outputs": []}
+
+
+def _markdown(source: str) -> dict[str, object]:
+    return {"cell_type": "markdown", "metadata": {}, "source": source}
+
+
+def _document(cells: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {"kernelspec": {"name": "python3", "language": "python"}},
+        "cells": cells,
+    }
+
+
+def _write_notebook(path: Path, cells: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_document(cells)), encoding="utf-8")
+
+
+def test_capture_with_a_variable_name_becomes_a_gap() -> None:
+    document = _document([_code("%%capture out\nprint(1)")])
+
+    with pytest.raises(papermill.NotebookConversionError, match="%%capture to store its output"):
+        papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+
+def test_capture_with_only_flags_is_dropped() -> None:
+    document = _document([_code("%%capture --no-stderr --no-display\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "%%capture" not in converted.source
+    assert "print(1)" in converted.source
+    assert any("dropped the %%capture magic" in note for note in converted.notes)
+
+
+def test_bare_capture_is_dropped() -> None:
+    document = _document([_code("%%capture\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "%%capture" not in converted.source
+
+
+@pytest.mark.parametrize("line", ["%load_ext autoreload", "%load_ext sql", "%autoreload 2", "%matplotlib inline"])
+def test_droppable_line_magics_are_dropped(line: str) -> None:
+    document = _document([_code(f"{line}\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert line.split()[0] not in converted.source
+    assert "print(1)" in converted.source
+
+
+@pytest.mark.parametrize("line", ["%load_ext myext", "%load_ext", "%load_ext autoreload myext"])
+def test_other_load_ext_becomes_a_gap(line: str) -> None:
+    document = _document([_code(f"{line}\nprint(1)")])
+
+    with pytest.raises(papermill.NotebookConversionError, match="has no deterministic|runs '%load_ext'"):
+        papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "%config InlineBackend.figure_format = 'retina'",
+        "%config Completer.use_jedi = False",
+        "%config IPCompleter.greedy = True",
+        "%config SqlMagic.autopandas = True",
+    ],
+)
+def test_display_and_completion_config_is_dropped(line: str) -> None:
+    document = _document([_code(f"{line}\nprint(1)")])
+
+    converted = papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+    assert "%config" not in converted.source
+    assert "print(1)" in converted.source
+
+
+def test_other_config_becomes_a_gap() -> None:
+    document = _document([_code("%config Foo.bar = 1\nprint(1)")])
+
+    with pytest.raises(papermill.NotebookConversionError, match="'%config'"):
+        papermill.convert_notebook(document, task_id="t", notebook_name="n.ipynb", passed_parameters={})
+
+
+def test_capture_with_a_name_becomes_a_placeholder_end_to_end(tmp_path: Path) -> None:
+    _write_notebook(tmp_path / "captured.ipynb", [_code("%%capture out\nprint(1)")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='captured') as dag:\n"
+        "    PapermillOperator(task_id='captured', input_nb='captured.ipynb', output_nb='o.ipynb')\n",
+    )
+
+    task = _by_key(pipeline)["captured"]
+    assert isinstance(task, PlaceholderActivity)
+    assert "%%capture" in task.comment
+
+
+def test_notebooks_sharing_a_basename_package_as_distinct_files(tmp_path: Path) -> None:
+    # Packaged notebooks are named after their task, so two notebooks called daily.ipynb in different
+    # folders must not overwrite each other in the bundle.
+    _write_notebook(tmp_path / "a" / "daily.ipynb", [_code("print('a')")])
+    _write_notebook(tmp_path / "b" / "daily.ipynb", [_code("print('b')")])
+    pipeline = _load_one(
+        tmp_path,
+        _IMPORTS + "with DAG(dag_id='two_daily') as dag:\n"
+        "    PapermillOperator(task_id='run_a', input_nb='/home/jdoe/a/daily.ipynb', output_nb='o.ipynb')\n"
+        "    PapermillOperator(task_id='run_b', input_nb='/home/jdoe/b/daily.ipynb', output_nb='o.ipynb')\n",
+    )
+    prepared = prepare_workflow(pipeline)
+
+    contents = {notebook.relative_path: notebook.content for notebook in prepared.notebooks}
+    assert len(contents) == 2
+    task_notebooks = {
+        task["task_key"]: task["notebook_task"]["notebook_path"].removeprefix("../src/") for task in prepared.tasks
+    }
+    assert set(task_notebooks) == {"run_a", "run_b"}
+    assert task_notebooks["run_a"] != task_notebooks["run_b"]
+    assert "print('a')" in contents[task_notebooks["run_a"]]
+    assert "print('b')" in contents[task_notebooks["run_b"]]

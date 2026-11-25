@@ -234,3 +234,105 @@ def test_file_arrival_trigger_queues_runs(tmp_path: Path) -> None:
 
     assert pipeline.schedule["kind"] == "file_arrival"
     assert _job(tmp_path, pipeline)["queue"] == {"enabled": True}
+
+
+def test_single_task_concurrency_sets_the_job_concurrency(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", concurrency=1")
+
+    assert pipeline.max_concurrent_runs == 1
+    assert not any(item["details"].get("name") == "concurrency" for item in pipeline.not_translatable)
+    assert _transformation(pipeline, "max_concurrent_runs_defaulted") is None
+
+
+def test_max_active_runs_and_task_concurrency_take_the_lower_limit(tmp_path: Path) -> None:
+    pipeline = _load(tmp_path, ", max_active_runs=3, max_active_tasks=2")
+
+    assert pipeline.max_concurrent_runs == 2
+
+
+def test_task_concurrency_on_a_multi_task_dag_is_a_gap(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "with DAG(dag_id='d', schedule_interval='0 1 * * *', concurrency=2) as dag:\n"
+        "    first = BashOperator(task_id='first', bash_command='echo 1')\n"
+        "    second = BashOperator(task_id='second', bash_command='echo 2')\n"
+        "    first >> second\n",
+        encoding="utf-8",
+    )
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.max_concurrent_runs is None
+    assert any(item["details"].get("name") == "concurrency" for item in pipeline.not_translatable)
+
+
+@pytest.mark.parametrize(
+    ("interval", "start_date", "expected"),
+    [
+        ("timedelta(hours=1)", "days_ago(2)", "0 0 * * * ?"),
+        ("timedelta(days=1)", "days_ago(1, hour=6, minute=30)", "0 30 6 * * ?"),
+    ],
+)
+def test_days_ago_start_date_anchors_a_timedelta_schedule(
+    tmp_path: Path, interval: str, start_date: str, expected: str
+) -> None:
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from datetime import timedelta\n"
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        "from airflow.utils.dates import days_ago\n"
+        f"default_args = {{'owner': 'Airflow', 'start_date': {start_date}}}\n"
+        f"with DAG(dag_id='d', default_args=default_args, schedule_interval={interval}, catchup=False) as dag:\n"
+        "    t = BashOperator(task_id='t', bash_command='echo hi')\n",
+        encoding="utf-8",
+    )
+    pipeline = load_airflow_dag(dag_path)
+
+    assert pipeline.schedule["quartz_cron_expression"] == expected
+    assert not any(item["details"].get("name") == "default_args.start_date" for item in pipeline.not_translatable)
+
+
+def _fan_out_dag(tmp_path: Path, dag_arguments: str) -> Pipeline:
+    """A prime >> 4 workers >> record DAG, the shape of a locked-partition pipeline."""
+    dag_path = tmp_path / "dag.py"
+    dag_path.write_text(
+        "from airflow import DAG\n"
+        "from airflow.operators.bash import BashOperator\n"
+        f"with DAG(dag_id='d', schedule_interval='15 * * * *'{dag_arguments}) as dag:\n"
+        "    prime = BashOperator(task_id='prime', bash_command='echo prime')\n"
+        "    record = BashOperator(task_id='record', bash_command='echo record')\n"
+        "    for worker in range(4):\n"
+        "        process = BashOperator(task_id=f'process_{worker}', bash_command='echo work')\n"
+        "        prime >> process >> record\n",
+        encoding="utf-8",
+    )
+    return load_airflow_dag(dag_path)
+
+
+@pytest.mark.parametrize(
+    ("dag_arguments", "is_gap"),
+    [
+        (", max_active_runs=1, max_active_tasks=4", False),
+        (", max_active_runs=1, max_active_tasks=3", True),
+        (", max_active_runs=2, max_active_tasks=4", True),
+        (", max_active_tasks=4", True),
+    ],
+)
+def test_task_limit_is_dropped_only_when_it_can_never_bind(tmp_path: Path, dag_arguments: str, is_gap: bool) -> None:
+    pipeline = _fan_out_dag(tmp_path, dag_arguments)
+
+    gap = any(item["details"].get("name") == "max_active_tasks" for item in pipeline.not_translatable)
+    assert gap is is_gap
+
+
+def test_parallel_width_counts_the_widest_independent_set() -> None:
+    from flowx.sources.airflow.loader.policy import parallel_width
+
+    chain = [("a", "b"), ("b", "c")]
+    fan_out = [("p", f"w{i}") for i in range(4)] + [(f"w{i}", "r") for i in range(4)]
+
+    assert parallel_width(["a", "b", "c"], chain) == 1
+    assert parallel_width(["p", "w0", "w1", "w2", "w3", "r"], fan_out) == 4
+    assert parallel_width(["x", "y"], []) == 2

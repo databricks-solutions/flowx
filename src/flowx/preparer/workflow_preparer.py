@@ -342,6 +342,16 @@ def prepare_workflow(pipeline: Pipeline) -> PreparedWorkflow:
     # route is covered and the two produce identical bundles. Idempotent and a no-op when there
     # is no such motif.
     pipeline = repair_collapsed_lookup_references(pipeline)
+    # Give every packaged spark-submit script a path no other script in this job shares, before any task
+    # is prepared, so the paths do not depend on the order tasks are prepared in.
+    from flowx.preparer.activity_preparers.spark_python import assign_packaged_paths
+
+    assign_packaged_paths(
+        activity
+        for top_level in pipeline.tasks
+        for activity in _iter_activity_with_descendants(top_level)
+        if isinstance(activity, SparkPythonActivity)
+    )
     all_tasks: list[dict[str, Any]] = []
     artifacts = PreparedArtifacts()
     cluster_hints: list[dict[str, Any]] = []
