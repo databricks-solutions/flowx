@@ -103,7 +103,9 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
         print("resolve-agentic is not enabled for ADF; ADF uses the legacy merge path.", file=sys.stderr)
         return 2
     from flowx.agentic import (
+        AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE,
         AgenticContractError,
+        AirflowSourceReproducibilityError,
         apply_airflow_resolutions,
         prepare_airflow_resolutions,
         stage_airflow_resolutions,
@@ -137,6 +139,9 @@ def _run_resolve_agentic(args: argparse.Namespace) -> int:
                 reset=args.reset,
                 source_path=args.source_path,
             )
+    except AirflowSourceReproducibilityError as error:
+        print(f"Agentic resolution unavailable: {error}", file=sys.stderr)
+        return AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE
     except (AgenticContractError, OSError, json.JSONDecodeError) as error:
         print(f"Agentic resolution failed: {error}", file=sys.stderr)
         return 1

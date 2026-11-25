@@ -87,6 +87,13 @@ def _prepare_source(source: Path, output: Path) -> list[dict]:
     return json.loads((output / ".work" / "agentic" / "gaps.json").read_text(encoding="utf-8"))
 
 
+def _write_files(root: Path, files: dict[str, str]) -> None:
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+
 def _candidate(gap: dict, *, source: str = "print('Migrated from Airflow')\n", status: str = "resolved") -> dict:
     if not source.startswith("# Databricks notebook source\n"):
         source = "# Databricks notebook source\n" + source
@@ -180,7 +187,11 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert gap["source_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert gap["dag_capture_identity"] == "dag:dag.py:agentic"
     assert gap["finding_fingerprints"] == [gap["gap_id"]]
+    assert gap["required_capability"] is None
     assert all(len(gap[field]) == 64 for field in ("task_sha256", "graph_sha256", "provider_sha256", "request_sha256"))
+    request_payload = dict(gap)
+    request_sha256 = request_payload.pop("request_sha256")
+    assert request_sha256 == agentic_contract._sha256_bytes(agentic_contract._json_bytes(request_payload))
     assert {argument["name"] for argument in gap["arguments"]} == {"task_id", "image", "retries"}
     assert {argument["owner"] for argument in gap["arguments"]} == {"flowx", "provider"}
     image = next(argument for argument in gap["arguments"] if argument["name"] == "image")
@@ -188,6 +199,312 @@ def test_prepare_writes_versioned_fingerprint_bound_gap_without_changing_report(
     assert (output / ".work" / "agentic" / "baseline.json").exists()
     assert (output / ".work" / "agentic" / "source" / "dag.py").read_bytes() == source.read_bytes()
     assert (output / ".work" / "agentic" / "provider" / "providers" / "flowx-gap-resolver" / "PROFILE.md").exists()
+
+
+def test_prepare_snapshots_project_helpers_and_normalizes_source_paths(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\n"
+                "from libs.operators import CopyOperator\n"
+                "with DAG(dag_id='custom') as dag:\n"
+                "    copy = CopyOperator(task_id='copy')\n"
+            ),
+            "libs/__init__.py": "",
+            "libs/operators.py": "class CopyOperator:\n    pass\n",
+        },
+    )
+
+    output = tmp_path / "output"
+    gaps = _prepare_source(source / "dag.py", output)
+
+    assert [gap["operator"] for gap in gaps] == ["CopyOperator"]
+    manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
+    assert {item["path"] for item in manifest["source_files"]} == {
+        "dag.py",
+        "libs/__init__.py",
+        "libs/operators.py",
+    }
+    assert (output / ".work" / "agentic" / "source" / "libs" / "operators.py").is_file()
+
+
+def test_prepare_accepts_symlinked_source_path_and_normalizes_lexical_and_resolved_paths(tmp_path: Path) -> None:
+    source = tmp_path / "project" / "dags"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\n"
+                "from libs.operators import CopyOperator\n"
+                "with DAG(dag_id='custom') as dag:\n"
+                "    copy = CopyOperator(task_id='copy')\n"
+            ),
+            "libs/__init__.py": "",
+            "libs/operators.py": "class CopyOperator:\n    pass\n",
+        },
+    )
+    linked_source = tmp_path / "linked-dags"
+    linked_source.symlink_to(source, target_is_directory=True)
+    output = tmp_path / "output"
+
+    gaps = _prepare_source(linked_source, output)
+
+    assert [gap["operator"] for gap in gaps] == ["CopyOperator"]
+    manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["source_path"] == str(linked_source.absolute())
+
+
+def test_prepare_does_not_canonicalize_sibling_paths_that_share_the_source_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    dbt_project = tmp_path / "dags_dbt" / "proj"
+    _write_files(dbt_project, {"dbt_project.yml": "name: sibling\nprofile: sibling\n"})
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\n"
+                "from airflow.operators.bash import BashOperator\n"
+                "from libs.operators import CopyOperator\n"
+                "with DAG(dag_id='prefix') as dag:\n"
+                f"    dbt = BashOperator(task_id='dbt', bash_command={f'cd {dbt_project} && dbt run'!r})\n"
+                "    copy = CopyOperator(task_id='copy')\n"
+            ),
+            "libs/__init__.py": "",
+            "libs/operators.py": "class CopyOperator:\n    pass\n",
+        },
+    )
+
+    gaps = _prepare_source(source, tmp_path / "output")
+
+    assert [gap["operator"] for gap in gaps] == ["CopyOperator"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("under /x/dags where flowx ran", "under <AIRFLOW_SOURCE_ROOT> where flowx ran"),
+        ("in '/x/dags'", "in '<AIRFLOW_SOURCE_ROOT>'"),
+        ('in "/x/dags".', 'in "<AIRFLOW_SOURCE_ROOT>".'),
+    ],
+)
+def test_source_path_canonicalization_accepts_prose_and_quote_boundaries(value: str, expected: str) -> None:
+    assert agentic_contract._canonicalize_source_paths(value, Path("/x/dags")) == expected
+
+
+def test_prepare_ignores_environment_trees_before_enforcing_snapshot_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "dags"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\n"
+                "with DAG(dag_id='agentic') as dag:\n"
+                "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+            ),
+            "venv/bin/python": "environment binary",
+            "node_modules/package/index.js": "module source",
+            "airflow-env/pyvenv.cfg": "home = /usr/bin\n",
+            "airflow-env/lib/module.py": "environment module",
+            "custom-conda/conda-meta/history": "created by conda",
+            "custom-conda/lib/module.py": "environment module",
+        },
+    )
+    monkeypatch.setattr(agentic_contract, "_MAX_SOURCE_SNAPSHOT_FILES", 1)
+    output = tmp_path / "output"
+
+    _prepare_source(source, output)
+
+    manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
+    assert [item["path"] for item in manifest["source_files"]] == ["dag.py"]
+
+
+@pytest.mark.parametrize("limit", ["files", "bytes"])
+def test_large_tree_prepares_referenced_snapshot_and_rechecks_missing_scripts(tmp_path, monkeypatch, limit):
+    source = tmp_path / "dags"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\nfrom airflow.operators.bash import BashOperator\n"
+                "from helpers import ProjectOperator\nwith DAG(dag_id='mixed'):\n"
+                "    one = ProjectOperator(task_id='one')\n"
+                "    two = BashOperator(task_id='two', bash_command='./missing.sh')\n"
+            ),
+            "helpers.py": "class ProjectOperator: pass\n",
+            "data/one.dat": "x" * 1024,
+            "data/two.dat": "y" * 1024,
+        },
+    )
+    if limit == "files":
+        monkeypatch.setattr(agentic_contract, "_MAX_SOURCE_SNAPSHOT_FILES", 2)
+    else:
+        monkeypatch.setattr(agentic_contract, "_MAX_SOURCE_SNAPSHOT_BYTES", 512)
+    out = tmp_path / "out"
+    gaps = _prepare_source(source / "dag.py", out)
+    snapshot = out / ".work" / "agentic" / "source"
+    assert (snapshot / "helpers.py").is_file() and not (snapshot / "data").exists()
+    assert _stage(out, _candidate(gaps[0])) == 0
+    agentic_contract.apply_airflow_resolutions(output_dir=out, accepted_gap_ids=[gaps[0]["gap_id"]])
+    (source / "missing.sh").write_text("echo ready\n")
+    with pytest.raises(AgenticContractError, match="source changed since prepare"):
+        agentic_contract.apply_airflow_resolutions(output_dir=out, accepted_gap_ids=[gaps[0]["gap_id"]])
+
+
+def test_prepare_hashes_oversized_sibling_data_without_copying_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _write_source(tmp_path)
+    data_file = tmp_path / "warehouse.dump"
+    data_file.write_bytes(b"x" * 32)
+    monkeypatch.setattr(agentic_contract, "_MAX_SOURCE_SNAPSHOT_FILE_BYTES", 8)
+    output = tmp_path / "output"
+
+    gaps = _prepare_source(source, output)
+
+    manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["omitted_source_files"] == [
+        {
+            "path": "warehouse.dump",
+            "size_bytes": 32,
+            "sha256": hashlib.sha256(b"x" * 32).hexdigest(),
+        }
+    ]
+    assert not (output / ".work" / "agentic" / "source" / "warehouse.dump").exists()
+
+    assert _stage(output, _candidate(gaps[0])) == 0
+    data_file.write_bytes(b"y" * 32)
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "apply",
+                "--source",
+                "airflow",
+                "--output-dir",
+                str(output),
+                "--accept-gap",
+                gaps[0]["gap_id"],
+            ]
+        )
+        == 1
+    )
+    assert "source changed since prepare; re-run prepare" in capsys.readouterr().err
+
+
+def test_prepare_excludes_output_directory_nested_under_source(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\n"
+                "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+                "with DAG(dag_id='nested_output') as dag:\n"
+                "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+            )
+        },
+    )
+    output = source / "flowx_output"
+
+    _prepare_source(source, output)
+
+    manifest = json.loads((output / ".work" / "agentic" / "manifest.json").read_text(encoding="utf-8"))
+    assert [item["path"] for item in manifest["source_files"]] == ["dag.py"]
+
+
+def test_prepare_normalizes_missing_script_search_paths(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    _write_files(
+        source,
+        {
+            "dag.py": (
+                "from airflow import DAG\n"
+                "from airflow.operators.bash import BashOperator\n"
+                "with DAG(dag_id='missing_script') as dag:\n"
+                "    run = BashOperator(task_id='run', bash_command='./run.sh')\n"
+            )
+        },
+    )
+
+    gaps = _prepare_source(source, tmp_path / "output")
+
+    assert [gap["operator"] for gap in gaps] == ["BashOperator"]
+
+
+def test_prepare_keeps_excluded_references_structural_and_ignores_excluded_dag_gaps(tmp_path: Path) -> None:
+    source = tmp_path / "dags"
+    _write_files(
+        source,
+        {
+            "caller.py": (
+                "from airflow import DAG\n"
+                "from airflow.operators.trigger_dagrun import TriggerDagRunOperator\n"
+                "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+                "with DAG(dag_id='caller') as dag:\n"
+                "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+                "    trigger = TriggerDagRunOperator(task_id='trigger', trigger_dag_id='target')\n"
+                "    pod >> trigger\n"
+            ),
+            "target.py": (
+                "from airflow import DAG\n"
+                "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator\n"
+                "with DAG(dag_id='target') as dag:\n"
+                "    pod = KubernetesPodOperator(task_id='pod', image='python:3.12')\n"
+            ),
+        },
+    )
+    output = tmp_path / "output"
+    assert (
+        airflow_convert(
+            [
+                "--source-dir",
+                str(source),
+                "--output-dir",
+                str(output),
+                "--exclude-dag",
+                "target",
+            ]
+        )
+        == 0
+    )
+    report_path = output / ".work" / "translation_report.json"
+    assert (
+        adapter_main(
+            [
+                "resolve-agentic",
+                "prepare",
+                "--source",
+                "airflow",
+                "--source-path",
+                str(source),
+                "--report",
+                str(report_path),
+                "--output-dir",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    gaps = json.loads((output / ".work" / "agentic" / "gaps.json").read_text(encoding="utf-8"))
+    state = agentic_contract.classify_airflow_gaps(report, gaps)
+
+    assert [(gap["pipeline_name"], gap["operator"]) for gap in gaps] == [("caller", "KubernetesPodOperator")]
+    assert [finding["code"] for finding in agentic_contract.airflow_gap_findings(report)] == [
+        "operator_placeholder",
+        "excluded_dag_reference",
+    ]
+    assert [gap["gap_id"] for gap in state["eligible_gaps"]] == [gaps[0]["gap_id"]]
+    assert [gap["code"] for gap in state["structural_gaps"]] == ["excluded_dag_reference"]
+    assert state["structural_gaps"][0]["required_capability"] == "graph_patch"
+    assert state["unsupported_gaps"] == []
 
 
 def test_prepare_can_select_one_gap_for_the_caller_without_losing_workspace_gaps(tmp_path: Path) -> None:
@@ -464,6 +781,58 @@ def test_taskflow_gap_arguments_come_from_invocation_not_callable_body(tmp_path:
             "preserved_by_flowx": False,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "operator_source",
+    [
+        (
+            "from airflow import DAG\n"
+            "from airflow.operators.python import BranchPythonOperator\n"
+            "def choose():\n"
+            "    return 'next'\n"
+            "with DAG(dag_id='branch') as dag:\n"
+            "    choose_path = BranchPythonOperator(task_id='choose_path', python_callable=choose)\n"
+        ),
+        (
+            "from airflow.decorators import dag, task_group\n"
+            "@task_group\n"
+            "def grouped():\n"
+            "    pass\n"
+            "@dag(dag_id='grouped')\n"
+            "def workflow():\n"
+            "    grouped()\n"
+            "workflow()\n"
+        ),
+    ],
+    ids=("branch", "task-group"),
+)
+def test_structural_gap_rejects_leaf_replacement_but_accepts_deferred_candidate(
+    tmp_path: Path, capsys, operator_source: str
+) -> None:
+    source = tmp_path / "structural.py"
+    source.write_text(operator_source, encoding="utf-8")
+    output = tmp_path / "output"
+    gap = _prepare_source(source, output)[0]
+
+    assert gap["allowed_replacement_kinds"] == []
+    assert gap["required_capability"] == "graph_patch"
+    assert _stage(output, _candidate(gap)) == 1
+    assert "not allowed for this gap" in capsys.readouterr().err
+
+    assert _stage(output, _candidate(gap, status="deferred")) == 0
+
+
+@pytest.mark.parametrize(
+    ("finding_codes", "expected"),
+    [
+        ({"unsupported_trigger_rule"}, "graph_patch"),
+        ({"unrepresented_task_policy"}, "task_policy_patch"),
+        ({"operator_placeholder"}, None),
+    ],
+)
+def test_finding_capability_label_is_shared_with_mcp(finding_codes: set[str], expected: str | None) -> None:
+    assert agentic_contract.airflow_finding_required_capability(finding_codes) == expected
 
 
 def test_only_actually_preserved_policy_arguments_are_flowx_owned(tmp_path: Path) -> None:
@@ -1121,6 +1490,53 @@ def test_apply_rejects_live_source_changes(tmp_path: Path, capsys):
     assert "source changed since prepare; re-run prepare" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("relative_path", ["helper.py", "new_dag.py"])
+def test_apply_rejects_source_files_added_after_prepare(tmp_path: Path, capsys, relative_path: str) -> None:
+    source, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+    (source.parent / relative_path).write_text("# added after prepare\n", encoding="utf-8")
+
+    exit_code = adapter_main(
+        [
+            "resolve-agentic",
+            "apply",
+            "--source",
+            "airflow",
+            "--output-dir",
+            str(output),
+            "--accept-gap",
+            gaps[0]["gap_id"],
+        ]
+    )
+
+    assert exit_code == 1
+    assert "source changed since prepare; re-run prepare" in capsys.readouterr().err
+
+
+def test_apply_reports_missing_source_input_when_prepared_path_was_removed(tmp_path: Path, capsys) -> None:
+    source, output, gaps = _prepare(tmp_path)
+    assert _stage(output, _candidate(gaps[0])) == 0
+    source.unlink()
+
+    exit_code = adapter_main(
+        [
+            "resolve-agentic",
+            "apply",
+            "--source",
+            "airflow",
+            "--output-dir",
+            str(output),
+            "--accept-gap",
+            gaps[0]["gap_id"],
+        ]
+    )
+
+    assert exit_code == 1
+    message = capsys.readouterr().err
+    assert "source input is missing" in message
+    assert "provide --source-path" in message
+
+
 def test_reduced_allowlist_restores_unaccepted_placeholder_and_reset_restores_all(tmp_path: Path):
     _, output, gaps = _prepare(tmp_path, two_tasks=True)
     for index, gap in enumerate(gaps):
@@ -1267,7 +1683,9 @@ def test_review_complete_declines_exact_staged_set_and_leaves_unstaged_gaps_unre
     ]
     outcomes = summarize_persisted_agentic_resolutions(evidence)["pipelines"]["agentic"]
     assert outcomes == {"resolved": 0, "needs_input": 0, "deferred": 0, "declined": 1, "unreviewed": 1}
-    assert package_main(["--report", str(report), "--output-dir", str(output)]) == 0
+    assert package_main(["--report", str(report), "--output-dir", str(output)]) == 1
+    assert not (output / "databricks.yml").exists()
+    assert package_main(["--report", str(report), "--output-dir", str(output), "--allow-unresolved-gaps"]) == 0
 
 
 def test_package_replays_review_complete_evidence_before_bundle_writes(tmp_path: Path, capsys) -> None:

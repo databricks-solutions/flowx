@@ -19,9 +19,9 @@ Read [`references/contract-v1.md`](references/contract-v1.md) and the pinned [`a
   --output-dir <output_dir>
 ```
 
-Preparation reparses the source, proves that it reproduces the deterministic report, and writes an immutable baseline, source snapshot, manifest, and `GapEnvelope v1` objects under `<output_dir>/.work/agentic/`. If the source or report no longer agrees, rerun convert first.
+Preparation reparses the source, proves that it reproduces the deterministic report, and writes an immutable baseline, source snapshot, manifest, and `GapEnvelope v1` objects under `<output_dir>/.work/agentic/`. Each envelope hash-binds its allowed replacement kinds and any `required_capability` beyond the leaf contract. If the source or report no longer agrees, rerun convert first.
 
-With MCP, call `flowx(command="resolve_agentic", parameters={"action": "prepare", "source": "airflow", "airflow_source_path": ..., "report_path": ..., "output_dir": ...})`.
+With MCP, call `flowx(command="resolve_agentic", parameters={"action": "prepare", "source": "airflow", "airflow_volume_path": ..., "report_path": ..., "output_dir": ...})`. The source may instead use `airflow_workspace_path`, `airflow_definitions`, or `airflow_source_path`.
 
 ## 2. Produce one candidate per gap
 
@@ -77,6 +77,8 @@ This records the staged candidates as declined. Prepared gaps without a staged c
 
 Use a reduced `--accept-gap` allowlist to reject selected candidates while retaining others. Use `--reset` to discard all accepted resolutions and start over from the deterministic baseline. A normal apply after a source edit is a hard failure: rerun convert and prepare instead of applying stale results. Reset is the recovery path and restores the durable baseline even after source drift or normal `.work/` pruning.
 
+With hosted MCP, every `action="apply"` call must resupply the same `airflow_volume_path`, `airflow_workspace_path`, `airflow_definitions`, or `airflow_source_path` used for prepare. The server removes each temporary hosted copy after the call, and apply verifies the resupplied source hashes before rebuilding from the immutable baseline.
+
 Package the reviewed report explicitly:
 
 ```bash
@@ -86,3 +88,9 @@ Package the reviewed report explicitly:
 ```
 
 Package replays the kept baseline and accepted candidates before writing bundle files. Missing, modified, or inconsistent evidence fails preflight.
+
+A reviewed report that intentionally retains placeholders returns `completed_with_reviewed_gaps` through MCP. Packaging the original deterministic report instead is an unreviewed decision and requires the separate `allow_unresolved_gaps=true` acknowledgment, which returns `packaged_with_unresolved_gaps`.
+
+If no candidate was accepted (including after reset or declining all staged candidates), packaging a report with gaps requires explicit acknowledgment. Pass `allow_unresolved_gaps=true` to MCP package or resume; the status is `packaged_with_unresolved_gaps`. Both return `reviewed_count` and `unreviewed_count` so a partial review is visible separately from acceptance.
+
+Prepare compares the new source copy with the root recorded at conversion, so a different hosted temporary folder does not invalidate the report. If the whole tree exceeds the snapshot limits, prepare retries with Python files and the scripts, templates, and project paths recorded by translation. If that also fails, migrate reports why. Entries marked `prepare_unavailable` describe gap eligibility only: do not stage a candidate until prepare returns a fingerprint-bound envelope.

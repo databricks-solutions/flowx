@@ -21,18 +21,46 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from flowx.ir_serde import pipeline_to_dict
-from flowx.sources.airflow.loader import discover_dags, load_pipelines
+from flowx.sources.airflow.loader import load_pipelines
 
 CONTRACT_VERSION = "1"
 PROVIDER_NAME = "airflow-to-dabs"
 PROVIDER_REPOSITORY = "https://github.com/park-peter/airflow-to-dabs"
+AGENTIC_SOURCE_REPRODUCIBILITY_EXIT_CODE = 3
 _PROVIDER_MANIFEST_PATH = PurePosixPath("providers/flowx-gap-resolver/provider.json")
 _PROVIDER_PIN_FIELD = "flowx_pin"
 
 _ALLOWED_REPLACEMENT_KINDS = ("notebook", "sql", "spark_python")
+_STRUCTURAL_OPERATOR_MARKERS = ("branch", "shortcircuit", "taskgroup", "subdag")
+_GRAPH_PATCH_FINDING_CODES = {
+    "excluded_dag_reference",
+    "taskflow_mapped_output_unavailable",
+    "unsupported_trigger_rule",
+}
+_TASK_POLICY_FINDING_CODES = {"unrepresented_task_policy"}
+_LEAF_RESOLVED_FINDING_CODES = {
+    "operator_placeholder",
+    "unconsumed_operator_arguments",
+    "unresolved_airflow_template",
+    "airflow_logical_date_semantics_undeterminable",
+    "classic_mapping_arguments_unbound",
+}
 _RESOLUTION_STATUSES = {"resolved", "needs_input", "deferred"}
 _DISPOSITIONS = {"consumed", "preserved_by_flowx", "ignored", "needs_input"}
 _MAX_GENERATED_FILE_BYTES = 1024 * 1024
+_MAX_SOURCE_SNAPSHOT_FILES = 10_000
+_MAX_SOURCE_SNAPSHOT_BYTES = 100 * 1024 * 1024
+_MAX_SOURCE_SNAPSHOT_FILE_BYTES = 10 * 1024 * 1024
+_IGNORED_SOURCE_DIRECTORIES = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
 _COMMON_TASK_FIELDS = (
     "name",
     "task_key",
@@ -49,6 +77,153 @@ _COMMON_TASK_FIELDS = (
     "compute_mode",
     "notifications",
 )
+
+
+def airflow_finding_required_capability(finding_codes: set[str]) -> str | None:
+    """Returns the non-leaf capability label implied by reconciled finding codes."""
+    if finding_codes & _GRAPH_PATCH_FINDING_CODES:
+        return "graph_patch"
+    if finding_codes & _TASK_POLICY_FINDING_CODES:
+        return "task_policy_patch"
+    return None
+
+
+def airflow_gap_findings(report: Any) -> list[dict[str, Any]]:
+    """Returns every unresolved reconciled gap finding in an Airflow report."""
+    pipelines = report.get("pipelines") if isinstance(report, dict) else None
+    if not isinstance(pipelines, list):
+        pipelines = [report] if isinstance(report, dict) else []
+    return [
+        finding
+        for pipeline in pipelines
+        if isinstance(pipeline, dict)
+        and isinstance(pipeline.get("tags"), dict)
+        and pipeline["tags"].get("source") == "airflow"
+        and pipeline.get("migration_status", "included") != "excluded"
+        for finding in pipeline.get("not_translatable") or []
+        if isinstance(finding, dict) and finding.get("severity") == "gap"
+    ]
+
+
+def airflow_pipeline_gap_count(pipeline: dict[str, Any]) -> int:
+    """Counts agentic placeholder and source-gap items for one included Airflow pipeline."""
+    if (pipeline.get("tags") or {}).get("source") != "airflow":
+        return 0
+    if pipeline.get("migration_status", "included") == "excluded":
+        return 0
+    audit = pipeline.get("audit")
+    activity_count = audit.get("agentic_count") if isinstance(audit, dict) else None
+    if isinstance(activity_count, int):
+        return activity_count
+    return sum(
+        1
+        for finding in pipeline.get("not_translatable") or []
+        if isinstance(finding, dict) and finding.get("severity") == "gap"
+    )
+
+
+def airflow_agentic_gap_total(report: dict[str, Any], *, minimum: int = 0) -> int:
+    """Counts agentic gap items across included Airflow pipelines using one shared denominator."""
+    total = sum(airflow_pipeline_gap_count(pipeline) for pipeline in _pipeline_list(report))
+    return max(total, minimum)
+
+
+def classify_airflow_gaps(
+    report: Any,
+    prepared_gaps: list[dict[str, Any]],
+    *,
+    prepare_unavailable: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Classifies reconciled Airflow findings against the v1 leaf-resolution contract."""
+    pipelines = report.get("pipelines") if isinstance(report, dict) else None
+    if not isinstance(pipelines, list):
+        pipelines = [report] if isinstance(report, dict) else []
+    findings: list[tuple[str, dict[str, Any]]] = []
+    eligible: list[dict[str, Any]] = []
+    structural: list[dict[str, Any]] = []
+    bound_fingerprints: set[str] = set()
+    for pipeline in pipelines:
+        if not isinstance(pipeline, dict) or pipeline.get("migration_status", "included") == "excluded":
+            continue
+        pipeline_name = str(pipeline.get("name", ""))
+        if prepare_unavailable:
+            pipeline_findings = [item for item in pipeline.get("not_translatable") or [] if isinstance(item, dict)]
+            by_capture: dict[str, list[dict[str, Any]]] = {}
+            for item in pipeline_findings:
+                capture_id = (item.get("details") or {}).get("capture_id")
+                if capture_id:
+                    by_capture.setdefault(capture_id, []).append(item)
+            for finding in pipeline_findings:
+                if finding.get("code") != "operator_placeholder":
+                    continue
+                details = finding.get("details") or {}
+                operator = details.get("operator")
+                if not isinstance(operator, str) or not operator:
+                    continue
+                related = by_capture.get(details.get("capture_id") or "", [finding])
+                capability = _required_capability(operator, related)
+                bound_fingerprints.update(str(other.get("fingerprint")) for other in related)
+                (structural if capability else eligible).append(
+                    {
+                        "gap_id": finding.get("fingerprint"),
+                        "operator": operator,
+                        "pipeline_name": pipeline_name,
+                        "required_capability": capability,
+                        "prepare_unavailable": prepare_unavailable,
+                        "resolution_support": "prepare_unavailable",
+                    }
+                )
+        findings.extend(
+            (pipeline_name, finding)
+            for finding in pipeline.get("not_translatable") or []
+            if isinstance(finding, dict) and finding.get("severity") == "gap"
+        )
+
+    for gap in prepared_gaps:
+        bound_fingerprints.update(str(value) for value in gap.get("finding_fingerprints") or [])
+        allowed_replacement_kinds = gap.get("allowed_replacement_kinds")
+        if isinstance(allowed_replacement_kinds, list) and allowed_replacement_kinds:
+            eligible.append(gap)
+            continue
+        required_capability = gap.get("required_capability")
+        structural.append(
+            {
+                **gap,
+                "resolution_support": "unsupported_by_leaf_contract",
+                "required_capability": (
+                    required_capability
+                    if isinstance(required_capability, str) and required_capability
+                    else "non_leaf_patch"
+                ),
+            }
+        )
+
+    unsupported: list[dict[str, Any]] = []
+    for pipeline_name, finding in findings:
+        fingerprint = finding.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint in bound_fingerprints:
+            continue
+        code = str(finding.get("code", ""))
+        required_capability = airflow_finding_required_capability({code})
+        classified_finding = {
+            "gap_id": fingerprint,
+            "pipeline_name": pipeline_name,
+            "code": code,
+            "message": str(finding.get("message", "")),
+            "source_span": {key: finding.get(key, 0) for key in ("line", "column", "end_line", "end_column")},
+            "details": finding.get("details") or {},
+            "resolution_support": "unsupported_by_leaf_contract",
+            "required_capability": required_capability or "source_semantics",
+        }
+        (structural if required_capability else unsupported).append(classified_finding)
+    return {"eligible_gaps": eligible, "structural_gaps": structural, "unsupported_gaps": unsupported}
+
+
+def _operator_requires_graph_patch(operator: str) -> bool:
+    normalized_operator = operator.casefold().replace("_", "")
+    return any(marker in normalized_operator for marker in _STRUCTURAL_OPERATOR_MARKERS)
+
+
 _FLOWX_OWNED_ARGUMENTS = {
     "task_id",
 }
@@ -87,6 +262,14 @@ class AgenticContractError(ValueError):
     """Raised when an agentic workspace or resolution violates the contract."""
 
 
+class AirflowSourceReproducibilityError(AgenticContractError):
+    """Raised when a source snapshot cannot reproduce its deterministic Airflow report."""
+
+
+class _SourceSnapshotLimit(AirflowSourceReproducibilityError):
+    """The selected source files exceed a snapshot resource limit."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GapEnvelope:
     """Versioned context for one source-reconciled leaf placeholder."""
@@ -112,6 +295,8 @@ class GapEnvelope:
     downstream_task_keys: list[str]
     dag_settings: dict[str, Any]
     reason: dict[str, str]
+    required_capability: str | None
+    allowed_replacement_kinds: tuple[str, ...]
 
     def as_dict(self, *, provider: dict[str, str] | None = None) -> dict[str, Any]:
         """Returns the public GapEnvelope v1 representation."""
@@ -141,7 +326,8 @@ class GapEnvelope:
             "downstream_task_keys": self.downstream_task_keys,
             "dag_settings": self.dag_settings,
             "reason": self.reason,
-            "allowed_replacement_kinds": list(_ALLOWED_REPLACEMENT_KINDS),
+            "required_capability": self.required_capability,
+            "allowed_replacement_kinds": list(self.allowed_replacement_kinds),
             "knowledge_provider": provider,
         }
         payload["request_sha256"] = _sha256_bytes(_json_bytes(payload))
@@ -162,6 +348,7 @@ class PersistedResolutionEvidence:
     """Validated kept evidence for one reviewed Airflow resolution run."""
 
     provider_version: str
+    baseline: dict[str, Any]
     gaps: list[dict[str, Any]]
     resolutions: list[StagedResolution]
     reviewed_resolutions: list[StagedResolution]
@@ -178,7 +365,8 @@ def prepare_airflow_resolutions(
     gap_id: str | None = None,
 ) -> dict[str, Any]:
     """Snapshots source and an exactly reproducible deterministic report, then emits GapEnvelope v1."""
-    source_path = source_path.resolve()
+    requested_source_path = source_path.absolute()
+    source_path = requested_source_path.resolve()
     report_path = report_path.resolve()
     output_dir = output_dir.resolve()
     if not source_path.exists():
@@ -192,9 +380,17 @@ def prepare_airflow_resolutions(
         raise AgenticContractError(f"Deterministic report contains invalid JSON: {error}") from error
     _require_airflow_baseline(baseline)
 
-    source_files = _source_files(source_path)
+    references = None
+    try:
+        source_files, omitted_source_files = _source_snapshot(source_path, excluded_roots=(output_dir,))
+    except _SourceSnapshotLimit:
+        references = _snapshot_references(baseline, requested_source_path)
+        source_files, omitted_source_files = _source_snapshot(
+            source_path, excluded_roots=(output_dir,), references=references
+        )
     if not source_files:
         raise AgenticContractError(f"No Airflow DAG files found under {source_path}")
+    source_entry_path = source_path.name if source_path.is_file() else None
     source_hashes = {relative: _sha256_file(path) for relative, path in source_files}
     baseline_hash = _sha256_bytes(baseline_bytes)
     provider_source = _provider_context_path()
@@ -212,11 +408,25 @@ def prepare_airflow_resolutions(
             shutil.copy2(path, destination)
         if {relative: _sha256_file(snapshot / relative) for relative in source_hashes} != source_hashes:
             raise AgenticContractError("Airflow source changed while the agentic snapshot was being created")
+        verified_source_files, verified_omitted_source_files = _source_snapshot(
+            source_path,
+            excluded_roots=(output_dir,),
+            references=references,
+        )
+        if {
+            relative: _sha256_file(path) for relative, path in verified_source_files
+        } != source_hashes or verified_omitted_source_files != omitted_source_files:
+            raise AgenticContractError("Airflow source changed while the agentic snapshot was being created")
 
-        snapshot_source = snapshot / source_files[0][0] if source_path.is_file() else snapshot
+        snapshot_source = snapshot / source_entry_path if source_entry_path is not None else snapshot
         rebuilt = _rebuild_airflow_report(snapshot_source, baseline, dbt_mode=dbt_mode)
-        if rebuilt != baseline:
-            raise AgenticContractError(
+        if not _source_reports_match(
+            baseline,
+            rebuilt,
+            baseline_source=requested_source_path,
+            rebuilt_source=snapshot_source,
+        ):
+            raise AirflowSourceReproducibilityError(
                 "Airflow source no longer reproduces the deterministic report; rerun convert before prepare"
             )
 
@@ -243,11 +453,14 @@ def prepare_airflow_resolutions(
             "contract_version": CONTRACT_VERSION,
             "source": "airflow",
             "provider": {**_provider_identity(), "sha256": provider_sha256},
-            "source_path": str(source_path),
+            "source_path": str(requested_source_path),
             "source_kind": "file" if source_path.is_file() else "directory",
+            "source_entry_path": source_entry_path,
             "source_files": [
                 {"path": relative, "sha256": source_hashes[relative]} for relative in sorted(source_hashes)
             ],
+            "omitted_source_files": omitted_source_files,
+            "referenced_snapshot": references is not None,
             "dbt_mode": dbt_mode,
             "baseline_report_sha256": baseline_hash,
             "gaps_sha256": _sha256_bytes(gaps_bytes),
@@ -364,11 +577,45 @@ def apply_airflow_resolutions(
     baseline = json.loads(baseline_bytes)
 
     _verify_snapshot(workspace, manifest)
-    live_source = (source_path or Path(manifest["source_path"])).resolve()
-    if _current_source_hashes(live_source) != _manifest_source_hashes(manifest):
+    prepared_source = Path(manifest["source_path"])
+    if source_path is None and not prepared_source.exists():
+        raise AgenticContractError(
+            "Airflow source input is missing because the prepared source path no longer exists; "
+            "provide --source-path with the same source used for prepare"
+        )
+    live_source = (source_path or prepared_source).resolve()
+    if not live_source.exists():
+        raise AgenticContractError(f"Airflow source path does not exist: {live_source}")
+    manifest_source_hashes = _manifest_source_hashes(manifest)
+    references = _snapshot_references(baseline, prepared_source) if manifest.get("referenced_snapshot") else None
+    current_source_files, current_omitted_source_files = _source_snapshot(
+        live_source,
+        excluded_roots=(output_dir,),
+        references=references,
+    )
+    current_source_hashes = {relative: _sha256_file(path) for relative, path in current_source_files}
+    if (
+        current_source_hashes != manifest_source_hashes
+        or current_omitted_source_files != _manifest_omitted_source_files(manifest)
+    ):
+        raise AgenticContractError("source changed since prepare; re-run prepare")
+    if references is not None and not _source_reports_match(
+        baseline,
+        _rebuild_airflow_report(live_source, baseline, dbt_mode=manifest["dbt_mode"]),
+        baseline_source=prepared_source,
+        rebuilt_source=live_source,
+        source_kind=manifest["source_kind"],
+    ):
         raise AgenticContractError("source changed since prepare; re-run prepare")
     snapshot_source = _snapshot_source(workspace, manifest)
-    if _rebuild_airflow_report(snapshot_source, baseline, dbt_mode=manifest["dbt_mode"]) != baseline:
+    rebuilt = _rebuild_airflow_report(snapshot_source, baseline, dbt_mode=manifest["dbt_mode"])
+    if not _source_reports_match(
+        baseline,
+        rebuilt,
+        baseline_source=prepared_source,
+        rebuilt_source=snapshot_source,
+        source_kind=str(manifest["source_kind"]),
+    ):
         raise AgenticContractError("The prepared source snapshot no longer reproduces the deterministic report")
 
     gap_by_id = {gap["gap_id"]: gap for gap in gaps}
@@ -427,10 +674,13 @@ def apply_airflow_resolutions(
         review_manifest_bytes=review_manifest_bytes,
     )
     _write_json_atomic(report_path, applied)
+    total_gaps = airflow_agentic_gap_total(baseline, minimum=len(gaps))
     return {
         "status": "review_complete" if review_complete else "applied",
         "accepted_gap_ids": selected_ids,
         "declined_gap_ids": [decision["gap_id"] for decision in decisions if decision["decision"] == "declined"],
+        "reviewed_count": len(reviewed_ids),
+        "unreviewed_count": total_gaps - len(reviewed_ids),
         "report_path": str(report_path),
     }
 
@@ -440,11 +690,12 @@ def _reset_airflow_resolutions(output_dir: Path) -> dict[str, Any]:
     workspace = _workspace(output_dir)
     evidence = output_dir / "metadata" / "agentic"
     if workspace.is_dir():
-        manifest, _ = _load_workspace(workspace)
+        manifest, gaps = _load_workspace(workspace)
         material_dir = workspace
         _verify_snapshot(workspace, manifest)
     elif evidence.is_dir():
-        _load_persisted_agentic_evidence(evidence)
+        persisted = _load_persisted_agentic_evidence(evidence)
+        gaps = persisted.gaps
         manifest = _read_json_object(evidence / "manifest.json")
         material_dir = evidence
     else:
@@ -477,7 +728,14 @@ def _reset_airflow_resolutions(output_dir: Path) -> dict[str, Any]:
 
     report_path = output_dir / ".work" / "translation_report.agentic.json"
     _write_json_atomic(report_path, baseline)
-    return {"status": "reset", "accepted_gap_ids": [], "declined_gap_ids": [], "report_path": str(report_path)}
+    return {
+        "status": "reset",
+        "accepted_gap_ids": [],
+        "declined_gap_ids": [],
+        "reviewed_count": 0,
+        "unreviewed_count": airflow_agentic_gap_total(baseline, minimum=len(gaps)),
+        "report_path": str(report_path),
+    }
 
 
 def _persist_agentic_evidence(
@@ -570,15 +828,19 @@ def _load_review_manifest(
     return expected, payload_bytes
 
 
-def validate_persisted_agentic_report(report: dict[str, Any], *, evidence_dir: Path) -> list[str]:
-    """Replays accepted candidates from kept evidence and compares the exact expected report."""
-    try:
-        evidence = _load_persisted_agentic_evidence(evidence_dir)
-    except AgenticContractError as error:
-        return [f"agentic resolution evidence is missing or invalid: {error}"]
+def validated_airflow_review_counts(report: dict[str, Any], *, evidence_dir: Path) -> dict[str, int]:
+    """Counts review decisions only after replay reproduces the exact report being packaged."""
+    evidence = _load_persisted_agentic_evidence(evidence_dir)
     if evidence.expected_report != report:
-        return ["agentic report does not match replay from its immutable baseline and accepted resolutions"]
-    return []
+        raise AgenticContractError(
+            "agentic report does not match replay from its immutable baseline and accepted resolutions"
+        )
+    total_gaps = airflow_agentic_gap_total(evidence.baseline, minimum=len(evidence.gaps))
+    return {
+        "accepted_count": len(evidence.resolutions),
+        "reviewed_count": len(evidence.decisions),
+        "unreviewed_count": total_gaps - len(evidence.decisions),
+    }
 
 
 def summarize_persisted_agentic_resolutions(evidence_dir: Path) -> dict[str, Any]:
@@ -667,8 +929,9 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
 
     try:
         source_hashes = _manifest_source_hashes(manifest)
+        _manifest_omitted_source_files(manifest)
     except (KeyError, TypeError) as error:
-        raise AgenticContractError("agentic resolution manifest has invalid source_files") from error
+        raise AgenticContractError("agentic resolution manifest has invalid source file records") from error
     if not source_hashes:
         raise AgenticContractError("agentic resolution manifest has no source_files")
     try:
@@ -745,6 +1008,7 @@ def _load_persisted_agentic_evidence(evidence_dir: Path) -> PersistedResolutionE
         raise AgenticContractError(f"agentic resolution evidence failed validation: {error}") from error
     return PersistedResolutionEvidence(
         provider_version=_provider_identity()["version"],
+        baseline=baseline,
         gaps=gaps,
         resolutions=resolutions,
         reviewed_resolutions=reviewed_resolutions,
@@ -779,7 +1043,9 @@ def _rebuild_airflow_report(source_path: Path, baseline: dict[str, Any], *, dbt_
     loaded = load_pipelines(source_path, dbt_mode=dbt_mode, exclude_dags=excluded)
     by_name = {pipeline.name: pipeline for pipeline in loaded}
     if any(name not in by_name for name in expected_names):
-        raise AgenticContractError("Source snapshot does not contain every DAG in the deterministic report")
+        raise AirflowSourceReproducibilityError(
+            "Source snapshot does not contain every DAG in the deterministic report"
+        )
     rebuilt = [pipeline_to_dict(by_name[name]) for name in expected_names]
     return {"pipelines": rebuilt} if "pipelines" in baseline else rebuilt[0]
 
@@ -814,6 +1080,12 @@ def _build_gap_envelopes(
             if path_key in findings:
                 raise AgenticContractError(f"Duplicate operator placeholder finding at task path: {task_path}")
             findings[path_key] = finding
+        structural_task_keys = {
+            str((finding.get("details") or {}).get("task_key"))
+            for finding in pipeline_findings
+            if airflow_finding_required_capability({str(finding.get("code", ""))}) is not None
+            and (finding.get("details") or {}).get("task_key")
+        }
         tasks = list(_walk_tasks(pipeline.get("tasks") or []))
         downstream = _downstream_index([task for _, task in tasks])
         for task_path, task in tasks:
@@ -821,6 +1093,8 @@ def _build_gap_envelopes(
                 continue
             matched_finding = findings.get(task_path)
             if not matched_finding or not matched_finding.get("fingerprint"):
+                if str(task.get("task_key", "")) in structural_task_keys:
+                    continue
                 raise AgenticContractError(f"Placeholder at task path {list(task_path)} has no bound finding")
             raw_definition = dict(task.get("raw_definition") or {})
             operator = str(raw_definition.get("operator") or task.get("original_type") or "UnknownOperator")
@@ -841,6 +1115,7 @@ def _build_gap_envelopes(
             if not any(item.get("code") == "unsupported_trigger_rule" for item in related_findings):
                 flowx_owned_arguments.add("trigger_rule")
             sanitized_definition = _sanitize_raw_definition(raw_definition)
+            required_capability = _required_capability(operator, related_findings)
             envelope = GapEnvelope(
                 gap_id=str(matched_finding["fingerprint"]),
                 pipeline_name=str(pipeline["name"]),
@@ -881,6 +1156,8 @@ def _build_gap_envelopes(
                     "code": str(matched_finding.get("code", "operator_placeholder")),
                     "message": str(task.get("comment") or matched_finding.get("message", "")),
                 },
+                required_capability=required_capability,
+                allowed_replacement_kinds=() if required_capability else _ALLOWED_REPLACEMENT_KINDS,
             )
             envelopes.append(envelope.as_dict(provider=provider))
     ordered = sorted(envelopes, key=lambda item: (item["pipeline_name"], item["task_path"]))
@@ -888,6 +1165,14 @@ def _build_gap_envelopes(
     if len(gap_ids) != len(set(gap_ids)):
         raise AgenticContractError("Prepared Airflow gaps contain duplicate fingerprints")
     return ordered
+
+
+def _required_capability(operator: str, findings: list[dict[str, Any]]) -> str | None:
+    """Returns the graph or task-policy capability required beyond v1 leaf replacement."""
+    finding_codes = {str(finding.get("code", "")) for finding in findings}
+    if _operator_requires_graph_patch(operator):
+        return "graph_patch"
+    return airflow_finding_required_capability(finding_codes)
 
 
 def _extract_arguments(
@@ -1304,24 +1589,36 @@ def _build_replacement(placeholder: dict[str, Any], candidate: dict[str, Any]) -
 
 
 def _annotate_finding(pipeline: dict[str, Any], resolution: StagedResolution) -> None:
+    bound_fingerprints = {str(value) for value in resolution.gap.get("finding_fingerprints") or ()}
+    bound_fingerprints.add(str(resolution.gap["gap_id"]))
+    matched_primary = False
     for finding in pipeline.get("not_translatable") or []:
-        if isinstance(finding, dict) and finding.get("fingerprint") == resolution.gap["gap_id"]:
-            finding["resolution"] = {
-                "status": resolution.candidate["status"],
-                "provider": resolution.candidate["provider"],
-                "model": resolution.candidate["model"],
-                "argument_disposition": resolution.candidate["argument_disposition"],
-                "prerequisites": resolution.candidate["prerequisites"],
-                "warnings": resolution.candidate["warnings"],
-                "semantic_deltas": resolution.candidate["semantic_deltas"],
-                "candidate_sha256": resolution.sha256,
-            }
-            if resolution.candidate["status"] == "resolved":
-                finding["severity"] = "resolved"
-            elif resolution.candidate.get("reason"):
-                finding["resolution"]["reason"] = resolution.candidate["reason"]
-            return
-    raise AgenticContractError(f"Gap finding is missing from pipeline report: {resolution.gap['gap_id']}")
+        if not isinstance(finding, dict):
+            continue
+        fingerprint = finding.get("fingerprint")
+        if fingerprint not in bound_fingerprints:
+            continue
+        is_primary = fingerprint == resolution.gap["gap_id"]
+        if is_primary:
+            matched_primary = True
+        elif finding.get("code") not in _LEAF_RESOLVED_FINDING_CODES:
+            continue
+        finding["resolution"] = {
+            "status": resolution.candidate["status"],
+            "provider": resolution.candidate["provider"],
+            "model": resolution.candidate["model"],
+            "argument_disposition": resolution.candidate["argument_disposition"],
+            "prerequisites": resolution.candidate["prerequisites"],
+            "warnings": resolution.candidate["warnings"],
+            "semantic_deltas": resolution.candidate["semantic_deltas"],
+            "candidate_sha256": resolution.sha256,
+        }
+        if resolution.candidate["status"] == "resolved":
+            finding["severity"] = "resolved"
+        elif resolution.candidate.get("reason"):
+            finding["resolution"]["reason"] = resolution.candidate["reason"]
+    if not matched_primary:
+        raise AgenticContractError(f"Gap finding is missing from pipeline report: {resolution.gap['gap_id']}")
 
 
 def _assert_task_invariants(
@@ -1442,29 +1739,167 @@ def _pipeline_list(payload: Any) -> list[dict[str, Any]]:
     return pipelines
 
 
-def _source_files(source_path: Path) -> list[tuple[str, Path]]:
-    paths = discover_dags(source_path)
-    root = source_path.parent if source_path.is_file() else source_path
-    return sorted((path.resolve().relative_to(root.resolve()).as_posix(), path.resolve()) for path in paths)
+def _snapshot_references(baseline: dict[str, Any], source_path: Path) -> set[Path]:
+    """Finds in-tree script, template and dbt project paths recorded by translation."""
+    root = Path(baseline.get("airflow_source_root") or (source_path.parent if source_path.is_file() else source_path))
+    references: set[Path] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"resolved_path", "local_project_dir", "project_dir"} and isinstance(item, str):
+                    path = Path(item)
+                    for origin in (root, root.resolve()):
+                        if path.is_absolute() and path.is_relative_to(origin):
+                            references.add(path.relative_to(origin))
+                else:
+                    visit(item)
+
+    visit(baseline)
+    return references
 
 
-def _current_source_hashes(source_path: Path) -> dict[str, str]:
-    if not source_path.exists():
-        return {}
-    return {relative: _sha256_file(path) for relative, path in _source_files(source_path)}
+def _source_snapshot(
+    source_path: Path,
+    *,
+    excluded_roots: tuple[Path, ...] = (),
+    references: set[Path] | None = None,
+) -> tuple[list[tuple[str, Path]], list[dict[str, Any]]]:
+    """Returns bounded source files plus hashed oversized files omitted from the copied snapshot."""
+    files: list[tuple[str, Path]] = []
+    omitted_files: list[dict[str, Any]] = []
+    total_bytes = 0
+    root = source_path.parent.resolve() if source_path.is_file() else source_path.resolve()
+    source_file = source_path.resolve() if source_path.is_file() else None
+    excluded = {
+        path.resolve() for path in excluded_roots if path.resolve() != root and path.resolve().is_relative_to(root)
+    }
+    for directory, directory_names, file_names in root.walk():
+        retained_directories: list[str] = []
+        for name in sorted(directory_names):
+            candidate = directory / name
+            if name in _IGNORED_SOURCE_DIRECTORIES:
+                continue
+            if candidate.is_symlink():
+                continue
+            if (candidate / "pyvenv.cfg").is_file() or (candidate / "conda-meta").is_dir():
+                continue
+            if candidate.resolve() in excluded:
+                continue
+            retained_directories.append(name)
+        directory_names[:] = retained_directories
+        for name in sorted(file_names):
+            candidate = directory / name
+            relative_path = candidate.relative_to(root)
+            if (
+                references is not None
+                and candidate.suffix != ".py"
+                and not (relative_path in references or any(parent in references for parent in relative_path.parents))
+            ):
+                continue
+            if candidate.is_symlink():
+                continue
+            if not candidate.is_file():
+                continue
+            size_bytes = candidate.stat().st_size
+            relative = candidate.relative_to(root).as_posix()
+            if (
+                size_bytes > _MAX_SOURCE_SNAPSHOT_FILE_BYTES
+                and candidate.resolve() != source_file
+                and candidate.suffix != ".py"
+            ):
+                omitted_files.append(
+                    {
+                        "path": relative,
+                        "size_bytes": size_bytes,
+                        "sha256": _sha256_file(candidate),
+                    }
+                )
+                continue
+            total_bytes += size_bytes
+            files.append((relative, candidate))
+            if len(files) > _MAX_SOURCE_SNAPSHOT_FILES:
+                raise _SourceSnapshotLimit(
+                    f"Airflow source snapshot exceeds {_MAX_SOURCE_SNAPSHOT_FILES} files; "
+                    "narrow the DAG folder or move unrelated Python packages outside it"
+                )
+            if total_bytes > _MAX_SOURCE_SNAPSHOT_BYTES:
+                raise _SourceSnapshotLimit(
+                    f"Airflow source snapshot exceeds {_MAX_SOURCE_SNAPSHOT_BYTES} bytes; "
+                    "narrow the DAG folder or move bulk data outside referenced projects"
+                )
+    return files, omitted_files
+
+
+def _source_reports_match(
+    baseline: dict[str, Any],
+    rebuilt: dict[str, Any],
+    *,
+    baseline_source: Path,
+    rebuilt_source: Path,
+    source_kind: str | None = None,
+) -> bool:
+    is_file = source_kind == "file" if source_kind is not None else baseline_source.is_file()
+    baseline_root = baseline_source.parent if is_file else baseline_source
+    if "airflow_source_root" in baseline:
+        baseline = baseline.copy()
+        recorded_root = baseline.pop("airflow_source_root")
+        if not isinstance(recorded_root, str) or not Path(recorded_root).is_absolute():
+            raise AgenticContractError("Invalid Airflow translation report source root")
+        baseline_root = Path(recorded_root)
+    rebuilt_root = rebuilt_source.parent if is_file else rebuilt_source
+    return _canonicalize_source_paths(baseline, baseline_root) == _canonicalize_source_paths(rebuilt, rebuilt_root)
+
+
+def _canonicalize_source_paths(value: Any, source_root: Path) -> Any:
+    if isinstance(value, dict):
+        return {key: _canonicalize_source_paths(item, source_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonicalize_source_paths(item, source_root) for item in value]
+    if not isinstance(value, str):
+        return value
+    roots = sorted({str(source_root.absolute()), str(source_root.resolve())}, key=len, reverse=True)
+    normalized = value
+    for root in roots:
+        boundary = re.compile(re.escape(root) + r"""(?=$|[/\\\s'"]|[.,;:)\]}](?=\s|$|['"]))""")
+        normalized = boundary.sub("<AIRFLOW_SOURCE_ROOT>", normalized)
+    return normalized
 
 
 def _manifest_source_hashes(manifest: dict[str, Any]) -> dict[str, str]:
     return {str(item["path"]): str(item["sha256"]) for item in manifest.get("source_files") or []}
 
 
+def _manifest_omitted_source_files(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    omitted = manifest.get("omitted_source_files") or []
+    if not isinstance(omitted, list):
+        raise AgenticContractError("agentic resolution manifest has invalid omitted_source_files")
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in omitted:
+        if not isinstance(item, dict) or set(item) != {"path", "size_bytes", "sha256"}:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source file")
+        path = item.get("path")
+        size_bytes = item.get("size_bytes")
+        digest = item.get("sha256")
+        if not isinstance(path, str) or not path or path in seen:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source path")
+        if not isinstance(size_bytes, int) or size_bytes < 0:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source size")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise AgenticContractError("agentic resolution manifest has an invalid omitted source digest")
+        seen.add(path)
+        records.append({"path": path, "size_bytes": size_bytes, "sha256": digest})
+    return records
+
+
 def _snapshot_source(workspace: Path, manifest: dict[str, Any]) -> Path:
     snapshot = workspace / "source"
     if manifest.get("source_kind") == "file":
-        files = manifest.get("source_files") or []
-        if len(files) != 1:
-            raise AgenticContractError("Prepared single-file source manifest is invalid")
-        return snapshot / files[0]["path"]
+        return snapshot / str(manifest.get("source_entry_path") or Path(str(manifest["source_path"])).name)
     return snapshot
 
 
@@ -1782,7 +2217,8 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _sha256_file(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _sha256_bytes(value: bytes) -> str:

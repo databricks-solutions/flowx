@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from flowx.adapter.predicates import walk_activities
 from flowx.ir_serde import pipeline_to_dict
@@ -82,7 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     pipeline_dicts = [pipeline_to_dict(pipeline) for pipeline in pipelines]
-    payload = pipeline_dicts[0] if len(pipeline_dicts) == 1 else {"pipelines": pipeline_dicts}
+    payload: dict[str, Any] = pipeline_dicts[0] if len(pipeline_dicts) == 1 else {"pipelines": pipeline_dicts}
+    root = args.source_dir.parent if args.source_dir.is_file() else args.source_dir
+    payload["airflow_source_root"] = str(root.absolute())
     report_file = work_dir / "translation_report.json"
     report_file.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
