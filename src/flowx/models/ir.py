@@ -437,12 +437,15 @@ class SparkPythonActivity(Activity):
         keep_remote_artifacts: True when the source names its script and JARs at cloud-storage URIs the
             job reads directly (for example a Dataproc payload); the preparer then keeps those URIs
             instead of pointing the task at copies inside the bundle.
+        packaged_path: Bundle path (under ``scripts/``) the script is packaged at, set per job by the
+            workflow preparer so two different scripts with one file name never share a path.
     """
 
     python_file: str
     parameters: list[str] | None = None
     generated_source: str | None = None
     keep_remote_artifacts: bool = False
+    packaged_path: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
