@@ -586,13 +586,16 @@ def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note
             libraries=[{"jar": app}] if app else None,
         )
     else:
+        source, reason = _exported_application(ctx, app)
+        if reason is not None:
+            return _missing_application_placeholder(ctx, app, reason)
         activity = SparkPythonActivity(
             name=ctx.task_id,
             task_key=ctx.task_key,
             description=f"Migrated from Airflow {note}.",
             python_file=app or f"../src/{ctx.task_key}.py",
             parameters=submit.app_args or None,
-            generated_source=_exported_application_source(ctx, app),
+            generated_source=source,
         )
     return activity
 
@@ -601,23 +604,27 @@ def _spark_activity_from_submit(ctx: OperatorContext, submit: _SparkSubmit, note
 _DATABRICKS_PATH_PREFIXES = ("dbfs:", "/dbfs/", "/Workspace/", "/Volumes/")
 
 
-def _exported_application_source(ctx: OperatorContext, application: str) -> str | None:
-    """Returns the source of a spark-submit Python application found in the export, or None.
+def _exported_application(ctx: OperatorContext, application: str) -> tuple[str | None, str | None]:
+    """Returns a spark-submit Python application's source from the export, or why it cannot be packaged.
 
     A spark-submit usually names the script by its path on the Airflow worker (``/home/<user>/...``), which
     package cannot download. When discover's folders hold that script, its text is packaged into the bundle
-    instead, the way a papermill notebook or a dbt project is. Remote and Databricks paths keep their usual
-    handling, and so does a script the export does not hold.
+    instead, the way a papermill notebook or a dbt project is. A local script the export does not hold, or
+    cannot be read, is a gap, since the job would have nothing to run. Remote and Databricks paths keep their
+    usual handling.
+
+    Returns:
+        The script's source and None, or None and the reason the script is missing.
     """
     if not application.endswith(".py") or "://" in application or application.startswith(_DATABRICKS_PATH_PREFIXES):
-        return None
-    located, _ = find_exported_file(application, ctx.template_search_paths, ctx.source_root)
+        return None, None
+    located, detail = find_exported_file(application, ctx.template_search_paths, ctx.source_root)
     if located is None:
-        return None
+        return None, detail
     try:
         source = located.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
+    except (OSError, UnicodeDecodeError) as error:
+        return None, f"could not be read from the export ({error})"
     ctx.disclosures.append(
         {
             "code": "spark_submit_application_packaged",
@@ -630,7 +637,16 @@ def _exported_application_source(ctx: OperatorContext, application: str) -> str 
             ),
         }
     )
-    return source
+    return source, None
+
+
+def _missing_application_placeholder(ctx: OperatorContext, application: str, reason: str) -> PlaceholderActivity:
+    return _placeholder(
+        ctx,
+        f"{ctx.operator} spark-submit application {application!r} {reason}. Copy the script into the folder "
+        "discover reads, then convert again.",
+        {"application": application},
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -948,12 +964,15 @@ def _build_spark_submit(ctx: OperatorContext) -> Activity:
             parameters=args,
             libraries=[{"jar": application}] if application else None,
         )
+    source, reason = _exported_application(ctx, application)
+    if reason is not None:
+        return _missing_application_placeholder(ctx, application, reason)
     return SparkPythonActivity(
         name=ctx.task_id,
         task_key=ctx.task_key,
         python_file=application or f"../src/{ctx.task_key}.py",
         parameters=args,
-        generated_source=_exported_application_source(ctx, application),
+        generated_source=source,
     )
 
 

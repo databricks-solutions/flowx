@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flowx.models.ir import SparkPythonActivity
+from flowx.models.ir import PlaceholderActivity, SparkPythonActivity
 from flowx.sources.airflow.loader import load_airflow_dags
 
 
@@ -60,12 +60,42 @@ def test_braces_in_a_packaged_script_are_not_treated_as_templates(tmp_path: Path
     assert "{{ ds }}" in pipeline.tasks[0].generated_source
 
 
-def test_spark_submit_script_missing_from_the_export_keeps_its_path(tmp_path: Path) -> None:
-    pipeline = _load(tmp_path, "BashOperator(task_id='job', bash_command='spark-submit /opt/jobs/etl.py')")
+@pytest.mark.parametrize(
+    "task",
+    [
+        "BashOperator(task_id='job', bash_command='spark-submit /opt/jobs/etl.py')",
+        "SparkSubmitOperator(task_id='job', application='/opt/jobs/etl.py')",
+    ],
+)
+def test_spark_submit_script_missing_from_the_export_is_a_gap(tmp_path: Path, task: str) -> None:
+    pipeline = _load(tmp_path, task)
+    activity = pipeline.tasks[0]
+
+    assert isinstance(activity, PlaceholderActivity)
+    assert "'/opt/jobs/etl.py'" in activity.comment
+    assert "was not found" in activity.comment
+    assert "Copy the script into the folder discover reads, then convert again" in activity.comment
+
+
+def test_spark_submit_script_matching_several_export_files_is_a_gap(tmp_path: Path) -> None:
+    for owner in ("alice", "bob"):
+        script = tmp_path / "export" / owner / "jobs" / "etl.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("print(1)\n", encoding="utf-8")
+
+    pipeline = _load(tmp_path, "SparkSubmitOperator(task_id='job', application='/home/carol/etl.py')")
+
+    assert isinstance(pipeline.tasks[0], PlaceholderActivity)
+    assert "matches 2 files" in pipeline.tasks[0].comment
+
+
+@pytest.mark.parametrize("application", ["dbfs:/jobs/etl.py", "s3://bucket/etl.py"])
+def test_remote_and_dbfs_spark_submit_scripts_keep_their_handling(tmp_path: Path, application: str) -> None:
+    pipeline = _load(tmp_path, f"SparkSubmitOperator(task_id='job', application='{application}')")
     activity = pipeline.tasks[0]
 
     assert isinstance(activity, SparkPythonActivity)
-    assert activity.python_file == "/opt/jobs/etl.py"
+    assert activity.python_file == application
     assert activity.generated_source is None
 
 
